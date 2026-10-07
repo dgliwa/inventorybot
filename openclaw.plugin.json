@@ -1,0 +1,104 @@
+{
+  "id": "inventorybot",
+  "name": "InventoryBot",
+  "description": "Discover retailers, validate adapters, schedule inventory watches, and deliver transition notifications.",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "adapterPromotion": {
+        "type": "object",
+        "required": ["mode"],
+        "properties": {
+          "mode": { "type": "string", "const": "manual", "default": "manual" }
+        },
+        "additionalProperties": false
+      },
+      "persistence": {
+        "type": "object",
+        "properties": {
+          "databasePath": {
+            "type": "string",
+            "description": "Intentional absolute path or non-traversing OpenClaw-state-relative SQLite path."
+          }
+        },
+        "additionalProperties": false
+      },
+      "monitoring": {
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean", "default": false },
+          "fastIntervalSeconds": { "type": "number", "minimum": 30, "maximum": 86400, "default": 120 },
+          "slowIntervalHours": { "type": "number", "minimum": 1, "maximum": 720, "default": 12 },
+          "rediscoveryAfterHours": { "type": "number", "minimum": 1, "maximum": 8760, "default": 168 },
+          "inspectAfterUnknownCount": { "type": "number", "minimum": 1, "maximum": 100, "default": 3 },
+          "timeoutMs": { "type": "number", "minimum": 1000, "maximum": 60000, "default": 10000 },
+          "maxConcurrency": { "type": "number", "minimum": 1, "maximum": 20, "default": 4 },
+          "perDomainConcurrency": { "type": "number", "minimum": 1, "maximum": 10, "default": 1 },
+          "jitterSeconds": { "type": "number", "minimum": 0, "maximum": 3600, "default": 15 },
+          "notifyWhenUnavailable": { "type": "boolean", "default": false }
+        },
+        "additionalProperties": false
+      },
+      "notifications": {
+        "type": "object",
+        "properties": {
+          "discord": {
+            "type": "object",
+            "required": ["target"],
+            "properties": {
+              "enabled": { "type": "boolean", "default": false },
+              "target": { "type": "string", "minLength": 1 },
+              "accountId": { "type": "string" },
+              "threadId": { "type": "string" }
+            },
+            "additionalProperties": false
+          },
+          "maxAttempts": { "type": "number", "minimum": 1, "maximum": 20, "default": 6 },
+          "batchSize": { "type": "number", "minimum": 1, "maximum": 100, "default": 25 },
+          "baseRetrySeconds": { "type": "number", "minimum": 1, "maximum": 3600, "default": 30 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "additionalProperties": false
+  },
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": [
+      "discover_retailers",
+      "check_inventory",
+      "inspect_retailer",
+      "generate_retailer_adapter",
+      "validate_retailer_adapter",
+      "inventory_adapter_list",
+      "inventory_adapter_approve",
+      "inventory_adapter_revoke",
+      "inventory_watch_add",
+      "inventory_watch_remove",
+      "inventory_watch_status",
+      "inventory_watch_run",
+      "inventory_monitor_status",
+      "inventory_monitor_run_fast",
+      "inventory_monitor_run_slow",
+      "inventory_notification_test"
+    ]
+  },
+  "toolMetadata": {
+    "inventory_notification_test": {
+      "optional": true,
+      "sideEffecting": true
+    },
+    "inventory_adapter_approve": { "sideEffecting": true },
+    "inventory_adapter_revoke": { "sideEffecting": true },
+    "inventory_watch_add": { "sideEffecting": true },
+    "inventory_watch_remove": { "sideEffecting": true },
+    "inventory_watch_run": { "sideEffecting": true },
+    "inventory_monitor_run_fast": { "sideEffecting": true },
+    "inventory_monitor_run_slow": { "sideEffecting": true },
+    "generate_retailer_adapter": { "sideEffecting": true },
+    "validate_retailer_adapter": { "sideEffecting": true }
+  }
+}
