@@ -7,6 +7,11 @@ import {
 } from "../domain/inventory.js";
 import { matchProductIdentity, type ProductIdentity } from "../domain/product.js";
 import type { RetailerInspection, InspectionObservation } from "./types.js";
+
+type RawInspection = Omit<
+  RetailerInspection,
+  "adapterReadiness" | "identityVerified" | "nextAction"
+>;
 import { assertPublicHttpUrl, type HostResolver } from "./url-safety.js";
 
 export type StaticFetch = (
@@ -90,7 +95,7 @@ function baseResult(
   return normalizeInventoryResult({ ...input, domain: normalizeDomain(url), url });
 }
 
-function blockedInspection(url: string, code: string, message: string): RetailerInspection {
+function blockedInspection(url: string, code: string, message: string): RawInspection {
   return {
     level: "static",
     finalUrl: url,
@@ -110,7 +115,7 @@ function jsonLdInspection(
   url: string,
   product: JsonObject,
   expectedProduct?: ProductIdentity,
-): RetailerInspection {
+): RawInspection {
   const identity = identityFromProduct(product);
   const match = expectedProduct ? matchProductIdentity(expectedProduct, identity) : undefined;
   if (match && !match.matches) {
@@ -209,7 +214,7 @@ function htmlInspection(
   url: string,
   html: string,
   expectedProduct?: ProductIdentity,
-): RetailerInspection {
+): RawInspection {
   const title = html.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1]
     ?.replace(/<[^>]+>/g, " ")
     .replace(/\s+/g, " ")
@@ -279,6 +284,36 @@ function htmlInspection(
   };
 }
 
+function finalizeInspection(inspection: RawInspection): RetailerInspection {
+  const errorCode = inspection.inventory.error?.code;
+  const adapterReadiness = inspection.inventory.status === "blocked"
+    ? "blocked"
+    : errorCode === "PRODUCT_MISMATCH"
+      ? "product_mismatch"
+      : inspection.sanitizedFixture &&
+          inspection.inventory.method === "json_ld" &&
+          inspection.inventory.status !== "unknown" &&
+          inspection.inventory.status !== "error"
+        ? "ready_for_generation"
+        : "insufficient_evidence";
+  const identityVerified = inspection.inventory.productMatchConfidence !== undefined &&
+    inspection.inventory.productMatchConfidence > 0;
+  const nextActions = {
+    ready_for_generation: "Generate and validate an inactive deterministic adapter candidate.",
+    insufficient_evidence: inspection.nextRecommendedLevel === "network"
+      ? "Use approved network or browser inspection; do not infer availability."
+      : "Review the page evidence or try another direct product URL.",
+    blocked: "Do not infer availability; try another retailer or approved inspection method.",
+    product_mismatch: "Verify the product URL and expected UPC, SKU, or MPN.",
+  } as const;
+  return {
+    ...inspection,
+    adapterReadiness,
+    identityVerified,
+    nextAction: nextActions[adapterReadiness],
+  };
+}
+
 export async function inspectRetailerStatic(
   url: string,
   options: {
@@ -318,11 +353,13 @@ export async function inspectRetailerStatic(
         continue;
       }
       if ([401, 403, 429].includes(response.status)) {
-        return blockedInspection(currentUrl, "BLOCKED", `Retailer returned HTTP ${response.status}.`);
+        return finalizeInspection(
+          blockedInspection(currentUrl, "BLOCKED", `Retailer returned HTTP ${response.status}.`),
+        );
       }
       if (!response.ok) {
         const code = response.status === 404 ? "PAGE_NOT_FOUND" : "HTTP_ERROR";
-        return {
+        return finalizeInspection({
           level: "static",
           finalUrl: currentUrl,
           inventory: baseResult(currentUrl, {
@@ -334,17 +371,19 @@ export async function inspectRetailerStatic(
           }),
           observations: [{ source: "http", field: "status", value: response.status }],
           nextRecommendedLevel: "none",
-        };
+        });
       }
 
       const html = await readPage(response);
       if (/captcha|verify you are human|access denied|bot challenge/i.test(html)) {
-        return blockedInspection(currentUrl, "CAPTCHA", "The page contains an anti-bot challenge.");
+        return finalizeInspection(
+          blockedInspection(currentUrl, "CAPTCHA", "The page contains an anti-bot challenge."),
+        );
       }
       const product = parseProducts(html)[0];
-      return product
+      return finalizeInspection(product
         ? jsonLdInspection(currentUrl, product, options.expectedProduct)
-        : htmlInspection(currentUrl, html, options.expectedProduct);
+        : htmlInspection(currentUrl, html, options.expectedProduct));
     }
     throw new Error("Redirect handling failed.");
   } catch (error) {
@@ -362,7 +401,7 @@ export async function inspectRetailerStatic(
           : /local|private|allowed|credentials/i.test(message)
             ? "BLOCKED_URL"
             : "HTTP_ERROR";
-    return {
+    return finalizeInspection({
       level: "static",
       finalUrl: currentUrl,
       inventory: normalizeInventoryResult({
@@ -376,7 +415,7 @@ export async function inspectRetailerStatic(
       }),
       observations: [],
       nextRecommendedLevel: "none",
-    };
+    });
   } finally {
     clearTimeout(timeout);
   }

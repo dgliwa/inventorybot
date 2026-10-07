@@ -5,6 +5,7 @@ export type InspectionObservation = {
     field: string;
     value: string | number | boolean;
 };
+export type AdapterReadiness = "ready_for_generation" | "insufficient_evidence" | "blocked" | "product_mismatch";
 export type RetailerInspection = {
     level: "static";
     finalUrl: string;
@@ -17,4 +18,7 @@ export type RetailerInspection = {
         sha256: string;
     };
     nextRecommendedLevel: "none" | "network" | "browser";
+    adapterReadiness: AdapterReadiness;
+    identityVerified: boolean;
+    nextAction: string;
 };

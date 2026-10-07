@@ -20,6 +20,7 @@ export type InventoryResult = {
         code: string;
         message: string;
     };
+    nextAction?: string;
 };
 export type InventoryResultInput = Omit<InventoryResult, "confidence" | "checkedAt"> & {
     confidence: number;

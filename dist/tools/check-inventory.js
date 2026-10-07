@@ -35,6 +35,7 @@ export async function checkInventory(input, registry) {
                 code: "UNSUPPORTED_RETAILER",
                 message: `InventoryBot does not have an active adapter for ${domain}.`,
             },
+            nextAction: "Inspect this direct product URL and generate, validate, then explicitly approve an adapter candidate.",
         });
     }
     const context = {

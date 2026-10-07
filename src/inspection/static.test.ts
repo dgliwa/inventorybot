@@ -52,6 +52,9 @@ describe("inspectRetailerStatic", () => {
         sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
       },
       nextRecommendedLevel: "none",
+      adapterReadiness: "ready_for_generation",
+      identityVerified: true,
+      nextAction: expect.stringContaining("Generate"),
     });
   });
 
@@ -63,6 +66,8 @@ describe("inspectRetailerStatic", () => {
         error: { code: "PRODUCT_MISMATCH" },
       },
       nextRecommendedLevel: "none",
+      adapterReadiness: "product_mismatch",
+      identityVerified: false,
     });
   });
 
@@ -101,6 +106,8 @@ describe("inspectRetailerStatic", () => {
   it("detects CAPTCHA pages without attempting bypass", async () => {
     await expect(inspectWith(responseFetch("<html>Verify you are human CAPTCHA</html>"))).resolves.toMatchObject({
       inventory: { status: "blocked", error: { code: "CAPTCHA" } },
+      adapterReadiness: "blocked",
+      identityVerified: false,
     });
   });
 

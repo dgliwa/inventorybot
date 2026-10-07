@@ -232,6 +232,35 @@ function htmlInspection(url, html, expectedProduct) {
         nextRecommendedLevel: status === "unknown" ? "network" : "none",
     };
 }
+function finalizeInspection(inspection) {
+    const errorCode = inspection.inventory.error?.code;
+    const adapterReadiness = inspection.inventory.status === "blocked"
+        ? "blocked"
+        : errorCode === "PRODUCT_MISMATCH"
+            ? "product_mismatch"
+            : inspection.sanitizedFixture &&
+                inspection.inventory.method === "json_ld" &&
+                inspection.inventory.status !== "unknown" &&
+                inspection.inventory.status !== "error"
+                ? "ready_for_generation"
+                : "insufficient_evidence";
+    const identityVerified = inspection.inventory.productMatchConfidence !== undefined &&
+        inspection.inventory.productMatchConfidence > 0;
+    const nextActions = {
+        ready_for_generation: "Generate and validate an inactive deterministic adapter candidate.",
+        insufficient_evidence: inspection.nextRecommendedLevel === "network"
+            ? "Use approved network or browser inspection; do not infer availability."
+            : "Review the page evidence or try another direct product URL.",
+        blocked: "Do not infer availability; try another retailer or approved inspection method.",
+        product_mismatch: "Verify the product URL and expected UPC, SKU, or MPN.",
+    };
+    return {
+        ...inspection,
+        adapterReadiness,
+        identityVerified,
+        nextAction: nextActions[adapterReadiness],
+    };
+}
 export async function inspectRetailerStatic(url, options = {}) {
     const httpFetch = options.httpFetch ?? fetch;
     const controller = new AbortController();
@@ -261,11 +290,11 @@ export async function inspectRetailerStatic(url, options = {}) {
                 continue;
             }
             if ([401, 403, 429].includes(response.status)) {
-                return blockedInspection(currentUrl, "BLOCKED", `Retailer returned HTTP ${response.status}.`);
+                return finalizeInspection(blockedInspection(currentUrl, "BLOCKED", `Retailer returned HTTP ${response.status}.`));
             }
             if (!response.ok) {
                 const code = response.status === 404 ? "PAGE_NOT_FOUND" : "HTTP_ERROR";
-                return {
+                return finalizeInspection({
                     level: "static",
                     finalUrl: currentUrl,
                     inventory: baseResult(currentUrl, {
@@ -277,16 +306,16 @@ export async function inspectRetailerStatic(url, options = {}) {
                     }),
                     observations: [{ source: "http", field: "status", value: response.status }],
                     nextRecommendedLevel: "none",
-                };
+                });
             }
             const html = await readPage(response);
             if (/captcha|verify you are human|access denied|bot challenge/i.test(html)) {
-                return blockedInspection(currentUrl, "CAPTCHA", "The page contains an anti-bot challenge.");
+                return finalizeInspection(blockedInspection(currentUrl, "CAPTCHA", "The page contains an anti-bot challenge."));
             }
             const product = parseProducts(html)[0];
-            return product
+            return finalizeInspection(product
                 ? jsonLdInspection(currentUrl, product, options.expectedProduct)
-                : htmlInspection(currentUrl, html, options.expectedProduct);
+                : htmlInspection(currentUrl, html, options.expectedProduct));
         }
         throw new Error("Redirect handling failed.");
     }
@@ -309,7 +338,7 @@ export async function inspectRetailerStatic(url, options = {}) {
                     : /local|private|allowed|credentials/i.test(message)
                         ? "BLOCKED_URL"
                         : "HTTP_ERROR";
-        return {
+        return finalizeInspection({
             level: "static",
             finalUrl: currentUrl,
             inventory: normalizeInventoryResult({
@@ -323,7 +352,7 @@ export async function inspectRetailerStatic(url, options = {}) {
             }),
             observations: [],
             nextRecommendedLevel: "none",
-        };
+        });
     }
     finally {
         clearTimeout(timeout);
