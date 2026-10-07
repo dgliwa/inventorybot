@@ -9,7 +9,12 @@ import type {
   SellerType,
 } from "./types.js";
 
-type DiscoveryQuery = { query: string; matchedBy: RetailerMatchKind; needle: string };
+type DiscoveryQuery = {
+  query: string;
+  matchedBy: RetailerMatchKind;
+  needle: string;
+  preferredDomain?: string;
+};
 
 const MARKETPLACES = new Set([
   "amazon.com",
@@ -42,7 +47,7 @@ const REJECTED_PATH_PARTS = [
 const normalizeText = (value: string): string =>
   value.toLocaleLowerCase().replace(/[^a-z0-9]/g, "");
 
-function buildQueries(product: ProductIdentity): DiscoveryQuery[] {
+function buildQueries(product: ProductIdentity, preferredDomains: string[]): DiscoveryQuery[] {
   const prefix = product.manufacturer ? `"${product.manufacturer}" ` : "";
   const queries: DiscoveryQuery[] = [];
   for (const field of ["sku", "upc", "mpn"] as const) {
@@ -55,13 +60,34 @@ function buildQueries(product: ProductIdentity): DiscoveryQuery[] {
       });
     }
   }
-  if (queries.length === 0 && product.name?.trim()) {
+
+  const name = product.name?.trim();
+  if (name) {
     const variant = product.variant ? ` "${product.variant}"` : "";
     queries.push({
-      query: `${prefix}"${product.name.trim()}"${variant} buy`,
+      query: `${prefix}"${name}"${variant} buy`,
       matchedBy: "name",
-      needle: product.name,
+      needle: name,
     });
+  }
+
+  const preferredNeedle = name ?? product.upc?.trim() ?? product.sku?.trim() ?? product.mpn?.trim();
+  const preferredMatch: RetailerMatchKind = name
+    ? "name"
+    : product.upc?.trim()
+      ? "upc"
+      : product.sku?.trim()
+        ? "sku"
+        : "mpn";
+  if (preferredNeedle) {
+    for (const domain of preferredDomains) {
+      queries.push({
+        query: `site:${domain} "${preferredNeedle}"`,
+        matchedBy: preferredMatch,
+        needle: preferredNeedle,
+        preferredDomain: domain,
+      });
+    }
   }
   return queries;
 }
@@ -115,6 +141,7 @@ function candidateFromResult(
   result: SearchResult,
   query: DiscoveryQuery,
   product: ProductIdentity,
+  preferredDomains: string[],
 ): RetailerCandidate | undefined {
   const url = canonicalProductUrl(result.url);
   if (!url || !isLikelyProductPage(result, url)) {
@@ -135,17 +162,37 @@ function candidateFromResult(
     confidence,
     matchedBy: query.matchedBy,
     sellerType: classifySeller(domain, product),
+    preferred: preferredDomains.some(
+      (preferred) => domain === preferred || domain.endsWith(`.${preferred}`),
+    ),
   };
 }
 
 export async function discoverRetailers(
   product: ProductIdentity,
   searchClient: RetailerSearchClient,
-  options: { resultsPerQuery?: number; signal?: AbortSignal } = {},
+  options: {
+    resultsPerQuery?: number;
+    preferredDomains?: string[];
+    signal?: AbortSignal;
+  } = {},
 ): Promise<DiscoveryResult> {
-  const queries = buildQueries(product);
-  const candidates = new Map<string, RetailerCandidate>();
   const errors: DiscoveryResult["errors"] = [];
+  const preferredDomains = [...new Set((options.preferredDomains ?? []).flatMap((value) => {
+    try {
+      return [normalizeDomain(value.includes("://") ? value : `https://${value}`)];
+    } catch {
+      errors.push({
+        query: value,
+        code: "INVALID_PREFERRED_DOMAIN",
+        message: `Preferred retailer domain ${value} is invalid.`,
+        nextAction: "Provide a hostname such as target.com, without a path.",
+      });
+      return [];
+    }
+  }))];
+  const queries = buildQueries(product, preferredDomains);
+  const candidates = new Map<string, RetailerCandidate>();
 
   if (product.sourceUrl) {
     const url = canonicalProductUrl(product.sourceUrl);
@@ -156,6 +203,9 @@ export async function discoverRetailers(
         confidence: 1,
         matchedBy: "source_url",
         sellerType: classifySeller(normalizeDomain(url), product),
+        preferred: preferredDomains.some(
+          (preferred) => normalizeDomain(url) === preferred || normalizeDomain(url).endsWith(`.${preferred}`),
+        ),
       });
     } else {
       errors.push({
@@ -182,7 +232,7 @@ export async function discoverRetailers(
         options.signal,
       );
       for (const result of results) {
-        const candidate = candidateFromResult(result, query, product);
+        const candidate = candidateFromResult(result, query, product, preferredDomains);
         if (!candidate) continue;
         const previous = candidates.get(candidate.url);
         if (!previous || candidate.confidence > previous.confidence) {
@@ -194,6 +244,7 @@ export async function discoverRetailers(
         query: query.query,
         code: "DISCOVERY_SEARCH_FAILED",
         message: error instanceof Error ? error.message : String(error),
+        nextAction: "Test the configured OpenClaw web-search provider, then retry discovery.",
       });
     }
   }
@@ -201,7 +252,10 @@ export async function discoverRetailers(
   return {
     product,
     queries: queries.map(({ query }) => query),
-    candidates: [...candidates.values()].sort((left, right) => right.confidence - left.confidence),
+    candidates: [...candidates.values()].sort(
+      (left, right) => Number(right.preferred) - Number(left.preferred) || right.confidence - left.confidence,
+    ),
     errors,
+    inventoryVerified: false,
   };
 }

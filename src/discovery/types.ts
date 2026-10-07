@@ -9,6 +9,7 @@ export type RetailerCandidate = {
   confidence: number;
   matchedBy: RetailerMatchKind;
   sellerType?: SellerType;
+  preferred: boolean;
 };
 
 export type SearchResult = {
@@ -25,5 +26,6 @@ export type DiscoveryResult = {
   product: ProductIdentity;
   queries: string[];
   candidates: RetailerCandidate[];
-  errors: Array<{ query: string; code: string; message: string }>;
+  errors: Array<{ query: string; code: string; message: string; nextAction?: string }>;
+  inventoryVerified: false;
 };

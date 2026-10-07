@@ -7,6 +7,7 @@ export type RetailerCandidate = {
     confidence: number;
     matchedBy: RetailerMatchKind;
     sellerType?: SellerType;
+    preferred: boolean;
 };
 export type SearchResult = {
     url: string;
@@ -24,5 +25,7 @@ export type DiscoveryResult = {
         query: string;
         code: string;
         message: string;
+        nextAction?: string;
     }>;
+    inventoryVerified: false;
 };

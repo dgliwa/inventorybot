@@ -5,11 +5,15 @@ function resultItems(payload) {
         return payload.results;
     if (Array.isArray(payload.items))
         return payload.items;
+    if (Array.isArray(payload.citations))
+        return payload.citations;
     if (isRecord(payload.data)) {
         if (Array.isArray(payload.data.results))
             return payload.data.results;
         if (Array.isArray(payload.data.items))
             return payload.data.items;
+        if (Array.isArray(payload.data.citations))
+            return payload.data.citations;
     }
     return [];
 }
@@ -23,7 +27,7 @@ export function normalizeSearchResults(payload) {
         return [{
                 url,
                 title: text(item.title) ?? text(item.name),
-                snippet: text(item.snippet) ?? text(item.description) ?? text(item.content),
+                snippet: text(item.snippet) ?? text(item.description) ?? text(item.content) ?? text(item.text),
             }];
     });
 }
