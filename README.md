@@ -145,11 +145,11 @@ Example watch input:
 ### Monitoring
 
 - `inventory_monitor_status` — show configuration, SQLite integrity/file/table metrics, adapter coverage, recent fast/slow runs, and outbox counts
-- `inventory_monitor_run_fast` — run every enabled watch; use `deliverNotifications: false` for a notification-suppressed smoke test
-- `inventory_monitor_run_slow` — run stale discovery and inspect repeatedly uncertain targets
+- `inventory_monitor_run_fast` — run enabled watches; optionally select `watchIds` and use `deliverNotifications: false` for a notification-suppressed smoke test
+- `inventory_monitor_run_slow` — run stale discovery and inspect repeatedly uncertain targets; optionally select `watchIds` or use `dryRun: true` for a no-write/no-network preview
 - `inventory_notification_test` — previews by default; sending a real Discord test requires `dryRun: false` and `confirmSend: true`
 
-`inventory_watch_remove` disables a watch by default and preserves its history. Permanent deletion requires both `permanent: true` and `confirmDeletion: true`. Watch add/status results report whether each target currently has an active adapter.
+`inventory_watch_remove` disables a watch by default and preserves its history. Permanent deletion requires both `permanent: true` and `confirmDeletion: true`. Watch add/status results report whether each target currently has an active adapter; set `requireActiveAdapter: true` when adding a watch to reject uncovered targets instead of persisting them.
 
 ## Fast loop
 

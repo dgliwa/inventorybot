@@ -25,6 +25,11 @@ export type SlowMonitorSummary = {
     adapterCandidatesGenerated: number;
     adapterCandidatesValidated: number;
     failures: number;
+    dryRun?: true;
+    preview?: {
+        staleWatches: number;
+        inspectableTargets: number;
+    };
 };
 type MonitorDependencies = {
     databaseFactory: () => InventoryDatabase;
@@ -57,14 +62,18 @@ export declare class InventoryMonitor {
     runFast(options?: {
         signal?: AbortSignal;
         deliverNotifications?: boolean;
+        watchIds?: string[];
     }): Promise<FastMonitorSummary>;
     runSlow(options?: {
         signal?: AbortSignal;
+        watchIds?: string[];
+        dryRun?: boolean;
     }): Promise<SlowMonitorSummary>;
     private combineWithLifecycleSignal;
     private scheduleFast;
     private scheduleSlow;
     private executeFast;
+    private previewSlow;
     private executeSlow;
     private generateAndValidateCandidate;
 }

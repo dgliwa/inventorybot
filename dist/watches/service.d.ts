@@ -29,6 +29,7 @@ export declare class WatchService {
             enabled?: boolean;
         }>;
         enabled?: boolean;
+        requireActiveAdapter?: boolean;
     }, options?: {
         signal?: AbortSignal;
     }): InventoryWatch;

@@ -30,6 +30,7 @@ export type AdapterApprovalRecord = {
     domain: string;
     lifecycle: string;
     latestCandidateId?: string;
+    latestSourceSha256?: string;
     activeCandidateId?: string;
     validationRuns: number;
     latestValidation?: {

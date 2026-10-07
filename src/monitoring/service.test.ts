@@ -101,6 +101,44 @@ describe("InventoryMonitor", () => {
     }
   });
 
+  it("previews the slow loop without network calls or monitor-run writes", async () => {
+    const temporary = temporaryDatabase();
+    const registry = new AdapterRegistry([new StatusAdapter()]);
+    const seed = temporary.open();
+    try {
+      new WatchService(seed, registry).add({
+        product: { sku: "PREVIEW-42" },
+        retailers: [{ url: "https://shop.example.test/products/42" }],
+      });
+    } finally {
+      seed.close();
+    }
+    const search = vi.fn(async () => []);
+    const monitor = new InventoryMonitor({
+      databaseFactory: temporary.open,
+      registry,
+      config: parseInventoryBotConfig({}),
+      searchClient: { search },
+    });
+    try {
+      await expect(monitor.runSlow({ dryRun: true })).resolves.toMatchObject({
+        dryRun: true,
+        watchesConsidered: 1,
+        preview: { staleWatches: 1, inspectableTargets: 0 },
+      });
+      expect(search).not.toHaveBeenCalled();
+      const database = temporary.open();
+      try {
+        expect(database.monitorStatus()).toEqual([]);
+      } finally {
+        database.close();
+      }
+    } finally {
+      await monitor.stop();
+      rmSync(temporary.directory, { recursive: true, force: true });
+    }
+  });
+
   it("aborts an active run on shutdown and permits a clean reopen", async () => {
     const temporary = temporaryDatabase();
     let notifyStarted: (() => void) | undefined;

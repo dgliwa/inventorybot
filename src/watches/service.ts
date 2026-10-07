@@ -58,6 +58,7 @@ export class WatchService {
     product: ProductIdentity;
     retailers: Array<{ url: string; enabled?: boolean }>;
     enabled?: boolean;
+    requireActiveAdapter?: boolean;
   }, options: { signal?: AbortSignal } = {}): InventoryWatch {
     options.signal?.throwIfAborted();
     if (input.retailers.length === 0) throw new Error("At least one retailer target is required.");
@@ -69,6 +70,14 @@ export class WatchService {
     for (const retailer of input.retailers) {
       const normalized = canonicalRetailerUrl(retailer.url);
       uniqueTargets.set(normalized.url, { ...normalized, enabled: retailer.enabled ?? true });
+    }
+    if (input.requireActiveAdapter) {
+      const unsupported = [...uniqueTargets.values()].filter(({ url }) => !this.registry.get(url));
+      if (unsupported.length > 0) {
+        throw new Error(
+          `NO_ACTIVE_ADAPTER: ${unsupported.map(({ domain }) => domain).join(", ")}`,
+        );
+      }
     }
     const createdAt = this.now().toISOString();
     options.signal?.throwIfAborted();

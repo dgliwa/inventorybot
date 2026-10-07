@@ -48,6 +48,7 @@ export type AdapterApprovalRecord = {
   domain: string;
   lifecycle: string;
   latestCandidateId?: string;
+  latestSourceSha256?: string;
   activeCandidateId?: string;
   validationRuns: number;
   latestValidation?: { valid: boolean; promotable: boolean; validatedAt: string };
@@ -804,6 +805,8 @@ export class InventoryDatabase {
     const rows = this.#database.prepare(`
       SELECT a.adapter_id, a.domain, a.lifecycle, a.current_candidate_id,
              a.active_candidate_id,
+             (SELECT source_sha256 FROM adapter_versions v
+              WHERE v.candidate_id = a.current_candidate_id) AS latest_source_sha256,
              (SELECT COUNT(*) FROM adapter_validation_runs r
               JOIN adapter_versions v ON v.candidate_id = r.candidate_id
               WHERE v.adapter_id = a.adapter_id) AS validation_runs
@@ -816,6 +819,7 @@ export class InventoryDatabase {
       lifecycle: string;
       current_candidate_id: string | null;
       active_candidate_id: string | null;
+      latest_source_sha256: string | null;
       validation_runs: number;
     }>;
     return rows.map((row) => {
@@ -843,6 +847,7 @@ export class InventoryDatabase {
         domain: row.domain,
         lifecycle: row.lifecycle,
         ...(row.current_candidate_id ? { latestCandidateId: row.current_candidate_id } : {}),
+        ...(row.latest_source_sha256 ? { latestSourceSha256: row.latest_source_sha256 } : {}),
         ...(row.active_candidate_id ? { activeCandidateId: row.active_candidate_id } : {}),
         validationRuns: Number(row.validation_runs),
         ...(validation ? {

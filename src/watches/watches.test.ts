@@ -243,6 +243,20 @@ describe("WatchService", () => {
     }
   });
 
+  it("can require active adapter coverage before creating a watch", () => {
+    const { database, service } = createService();
+    try {
+      expect(() => service.add({
+        product: { upc: "123456789012" },
+        retailers: [{ url: "https://unsupported.example/product/42" }],
+        requireActiveAdapter: true,
+      })).toThrow("NO_ACTIVE_ADAPTER");
+      expect(service.status()).toEqual([]);
+    } finally {
+      database.close();
+    }
+  });
+
   it("rejects empty products and retailer lists", () => {
     const { database, service } = createService();
     try {

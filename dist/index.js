@@ -3,6 +3,7 @@ import { definePluginEntry, } from "openclaw/plugin-sdk/plugin-entry";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
 import { ExampleJsonLdAdapter } from "./adapters/builtins/example-jsonld.js";
 import { AdapterRegistry } from "./adapters/registry.js";
+import { domainMatches, normalizeDomain } from "./adapters/url.js";
 import { discoverRetailers } from "./discovery/discover.js";
 import { OpenClawSearchClient } from "./discovery/openclaw-search.js";
 import { generateRetailerAdapter } from "./generation/generate-adapter.js";
@@ -31,6 +32,11 @@ function activeAdapterRegistry(api, database) {
             errors,
         })),
     });
+}
+function affectedWatchIds(database, domain) {
+    return database.listWatches()
+        .filter(({ retailers }) => retailers.some(({ url }) => domainMatches(normalizeDomain(url), domain)))
+        .map(({ id }) => id);
 }
 function notificationChannels(api, options) {
     if (!options.enabled)
@@ -261,12 +267,23 @@ const inventoryToolPlugin = defineToolPlugin({
         tool({
             name: "inventory_adapter_list",
             description: "Read adapter candidates, validation gates, exact fingerprints, active versions, activation readiness, and approval history.",
-            parameters: Type.Object({ adapterId: Type.Optional(Type.String({ minLength: 1 })) }, { additionalProperties: false }),
-            execute: async ({ adapterId }, config, { api, signal }) => {
+            parameters: Type.Object({
+                adapterId: Type.Optional(Type.String({ minLength: 1 })),
+                domain: Type.Optional(Type.String({ minLength: 1 })),
+                lifecycle: Type.Optional(Type.String({ minLength: 1 })),
+                activeOnly: Type.Optional(Type.Boolean({ default: false })),
+            }, { additionalProperties: false }),
+            execute: async ({ adapterId, domain, lifecycle, activeOnly }, config, { api, signal }) => {
                 signal?.throwIfAborted();
                 const database = openInventoryDatabase(api, config.persistence?.databasePath);
                 try {
-                    return { adapters: database.listAdapterApprovals(adapterId) };
+                    const normalizedDomain = domain
+                        ? normalizeDomain(domain.includes("://") ? domain : `https://${domain}`)
+                        : undefined;
+                    const adapters = database.listAdapterApprovals(adapterId).filter((adapter) => (!normalizedDomain || domainMatches(adapter.domain, normalizedDomain)) &&
+                        (!lifecycle || adapter.lifecycle === lifecycle) &&
+                        (!activeOnly || adapter.lifecycle === "active"));
+                    return { adapters };
                 }
                 finally {
                     database.close();
@@ -287,7 +304,10 @@ const inventoryToolPlugin = defineToolPlugin({
                 const database = openInventoryDatabase(api, config.persistence?.databasePath);
                 try {
                     signal?.throwIfAborted();
-                    return approveRetailerAdapter(database, input);
+                    const result = approveRetailerAdapter(database, input);
+                    return result.approved
+                        ? { ...result, affectedWatchIds: affectedWatchIds(database, result.domain) }
+                        : result;
                 }
                 finally {
                     database.close();
@@ -308,7 +328,15 @@ const inventoryToolPlugin = defineToolPlugin({
                 const database = openInventoryDatabase(api, config.persistence?.databasePath);
                 try {
                     signal?.throwIfAborted();
-                    return revokeRetailerAdapter(database, input);
+                    const candidate = database.getAdapterCandidate(input.candidateId);
+                    const result = revokeRetailerAdapter(database, input);
+                    return result.revoked && candidate
+                        ? {
+                            ...result,
+                            domain: candidate.spec.domain,
+                            affectedWatchIds: affectedWatchIds(database, candidate.spec.domain),
+                        }
+                        : result;
                 }
                 finally {
                     database.close();
@@ -325,12 +353,13 @@ const inventoryToolPlugin = defineToolPlugin({
                     enabled: Type.Optional(Type.Boolean({ default: true })),
                 }, { additionalProperties: false }), { minItems: 1, maxItems: 100 }),
                 enabled: Type.Optional(Type.Boolean({ default: true })),
+                requireActiveAdapter: Type.Optional(Type.Boolean({ default: false })),
             }, { additionalProperties: false }),
             execute: async (input, config, { api, signal }) => {
                 signal?.throwIfAborted();
                 const database = openInventoryDatabase(api, config.persistence?.databasePath);
                 try {
-                    return new WatchService(database, adapterRegistry).add(input, { signal });
+                    return new WatchService(database, activeAdapterRegistry(api, database)).add(input, { signal });
                 }
                 finally {
                     database.close();
@@ -377,7 +406,7 @@ const inventoryToolPlugin = defineToolPlugin({
             execute: async ({ watchId }, config, { api }) => {
                 const database = openInventoryDatabase(api, config.persistence?.databasePath);
                 try {
-                    const status = new WatchService(database, adapterRegistry).status(watchId);
+                    const status = new WatchService(database, activeAdapterRegistry(api, database)).status(watchId);
                     return status ?? {
                         error: { code: "WATCH_NOT_FOUND", message: `No watch exists with id ${watchId}.` },
                     };
@@ -463,14 +492,20 @@ const inventoryToolPlugin = defineToolPlugin({
         tool({
             name: "inventory_monitor_run_fast",
             description: "Run the fast inventory loop using active adapters only. Persist observations, never perform discovery or generation, and allow notification delivery to be suppressed for testing.",
-            parameters: Type.Object({ deliverNotifications: Type.Optional(Type.Boolean({ default: true })) }, { additionalProperties: false }),
-            execute: async ({ deliverNotifications }, _config, { api, signal }) => createMonitor(api).runFast({ signal, deliverNotifications }),
+            parameters: Type.Object({
+                deliverNotifications: Type.Optional(Type.Boolean({ default: true })),
+                watchIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 100 })),
+            }, { additionalProperties: false }),
+            execute: async ({ deliverNotifications, watchIds }, _config, { api, signal }) => createMonitor(api).runFast({ signal, deliverNotifications, watchIds }),
         }),
         tool({
             name: "inventory_monitor_run_slow",
             description: "Run bounded stale discovery and inspection. Persist retailer and inactive adapter candidates, but never add watch targets or activate adapters automatically.",
-            parameters: Type.Object({}, { additionalProperties: false }),
-            execute: async (_input, _config, { api, signal }) => createMonitor(api).runSlow({ signal }),
+            parameters: Type.Object({
+                watchIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 100 })),
+                dryRun: Type.Optional(Type.Boolean({ default: false })),
+            }, { additionalProperties: false }),
+            execute: async ({ watchIds, dryRun }, _config, { api, signal }) => createMonitor(api).runSlow({ signal, watchIds, dryRun }),
         }),
         tool({
             name: "inventory_notification_test",

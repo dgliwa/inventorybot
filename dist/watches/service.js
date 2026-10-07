@@ -49,6 +49,12 @@ export class WatchService {
             const normalized = canonicalRetailerUrl(retailer.url);
             uniqueTargets.set(normalized.url, { ...normalized, enabled: retailer.enabled ?? true });
         }
+        if (input.requireActiveAdapter) {
+            const unsupported = [...uniqueTargets.values()].filter(({ url }) => !this.registry.get(url));
+            if (unsupported.length > 0) {
+                throw new Error(`NO_ACTIVE_ADAPTER: ${unsupported.map(({ domain }) => domain).join(", ")}`);
+            }
+        }
         const createdAt = this.now().toISOString();
         options.signal?.throwIfAborted();
         return this.withAdapterReadiness(this.database.createWatch({

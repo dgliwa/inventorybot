@@ -29,6 +29,8 @@ export type SlowMonitorSummary = {
   adapterCandidatesGenerated: number;
   adapterCandidatesValidated: number;
   failures: number;
+  dryRun?: true;
+  preview?: { staleWatches: number; inspectableTargets: number };
 };
 
 type MonitorDependencies = {
@@ -140,20 +142,32 @@ export class InventoryMonitor {
   }
 
   runFast(
-    options: { signal?: AbortSignal; deliverNotifications?: boolean } = {},
+    options: {
+      signal?: AbortSignal;
+      deliverNotifications?: boolean;
+      watchIds?: string[];
+    } = {},
   ): Promise<FastMonitorSummary> {
     if (this.#fastRun) return this.#fastRun;
     const signal = this.combineWithLifecycleSignal(options.signal);
-    this.#fastRun = this.executeFast(signal, options.deliverNotifications !== false).finally(() => {
+    this.#fastRun = this.executeFast(
+      signal,
+      options.deliverNotifications !== false,
+      options.watchIds,
+    ).finally(() => {
       this.#fastRun = undefined;
     });
     return this.#fastRun;
   }
 
-  runSlow(options: { signal?: AbortSignal } = {}): Promise<SlowMonitorSummary> {
+  runSlow(
+    options: { signal?: AbortSignal; watchIds?: string[]; dryRun?: boolean } = {},
+  ): Promise<SlowMonitorSummary> {
     if (this.#slowRun) return this.#slowRun;
     const signal = this.combineWithLifecycleSignal(options.signal);
-    this.#slowRun = this.executeSlow(signal).finally(() => {
+    this.#slowRun = (options.dryRun
+      ? this.previewSlow(signal, options.watchIds)
+      : this.executeSlow(signal, options.watchIds)).finally(() => {
       this.#slowRun = undefined;
     });
     return this.#slowRun;
@@ -195,6 +209,7 @@ export class InventoryMonitor {
   private async executeFast(
     signal: AbortSignal | undefined,
     deliverNotifications: boolean,
+    watchIds?: string[],
   ): Promise<FastMonitorSummary> {
     signal?.throwIfAborted();
     const database = this.#databaseFactory();
@@ -202,7 +217,10 @@ export class InventoryMonitor {
     const runId = database.startMonitorRun("fast", startedAt);
     try {
       signal?.throwIfAborted();
-      const watches = database.listWatches().filter(({ enabled }) => enabled);
+      const selectedWatchIds = watchIds ? new Set(watchIds) : undefined;
+      const watches = database.listWatches().filter(({ id, enabled }) =>
+        enabled && (!selectedWatchIds || selectedWatchIds.has(id)),
+      );
       let checkedTargets = 0;
       let watchFailures = 0;
       let notificationsRecommended = 0;
@@ -275,7 +293,59 @@ export class InventoryMonitor {
     }
   }
 
-  private async executeSlow(signal?: AbortSignal): Promise<SlowMonitorSummary> {
+  private async previewSlow(
+    signal?: AbortSignal,
+    watchIds?: string[],
+  ): Promise<SlowMonitorSummary> {
+    signal?.throwIfAborted();
+    const database = this.#databaseFactory();
+    try {
+      const selectedWatchIds = watchIds ? new Set(watchIds) : undefined;
+      const watches = database.listWatches().filter(({ id, enabled }) =>
+        enabled && (!selectedWatchIds || selectedWatchIds.has(id)),
+      );
+      const staleBefore = this.#now().getTime() -
+        this.#config.monitoring.rediscoveryAfterHours * 60 * 60_000;
+      let inspectableTargets = 0;
+      for (const watch of watches) {
+        for (const target of watch.retailers.filter(({ enabled }) => enabled)) {
+          const statuses = database.recentStatuses(
+            target.id,
+            this.#config.monitoring.inspectAfterUnknownCount,
+          );
+          if (
+            statuses.length >= this.#config.monitoring.inspectAfterUnknownCount &&
+            statuses.every((status) => status === "unknown" || status === "error")
+          ) {
+            inspectableTargets += 1;
+          }
+        }
+      }
+      return {
+        watchesConsidered: watches.length,
+        discoveries: 0,
+        candidatesFound: 0,
+        targetsInspected: 0,
+        adapterCandidatesGenerated: 0,
+        adapterCandidatesValidated: 0,
+        failures: 0,
+        dryRun: true,
+        preview: {
+          staleWatches: watches.filter(({ lastDiscoveryAt }) =>
+            (lastDiscoveryAt ? Date.parse(lastDiscoveryAt) : 0) <= staleBefore,
+          ).length,
+          inspectableTargets,
+        },
+      };
+    } finally {
+      database.close();
+    }
+  }
+
+  private async executeSlow(
+    signal?: AbortSignal,
+    watchIds?: string[],
+  ): Promise<SlowMonitorSummary> {
     signal?.throwIfAborted();
     const database = this.#databaseFactory();
     const runId = database.startMonitorRun("slow", this.#now().toISOString());
@@ -292,7 +362,10 @@ export class InventoryMonitor {
       const now = this.#now();
       const registry = this.#registryFactory(database);
       const staleBefore = now.getTime() - this.#config.monitoring.rediscoveryAfterHours * 60 * 60_000;
-      const watches = database.listWatches().filter(({ enabled }) => enabled);
+      const selectedWatchIds = watchIds ? new Set(watchIds) : undefined;
+      const watches = database.listWatches().filter(({ id, enabled }) =>
+        enabled && (!selectedWatchIds || selectedWatchIds.has(id)),
+      );
       summary.watchesConsidered = watches.length;
 
       for (const watch of watches) {
