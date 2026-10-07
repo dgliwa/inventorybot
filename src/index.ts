@@ -240,17 +240,20 @@ const inventoryToolPlugin = defineToolPlugin({
     tool({
       name: "discover_retailers",
       description:
-        "Discover likely retailer product pages using exact identifiers before product names. Discovery is not intended for frequent polling.",
+        "Find direct retailer product pages using exact identifiers first, then product-name and preferred-retailer searches. Discovery identifies candidates only; it never verifies stock or creates watches.",
       parameters: Type.Object(
         {
           product: productIdentitySchema,
           resultsPerQuery: Type.Optional(
             Type.Number({ minimum: 1, maximum: 20, default: 8 }),
           ),
+          preferredDomains: Type.Optional(
+            Type.Array(Type.String({ minLength: 1 }), { maxItems: 20 }),
+          ),
         },
         { additionalProperties: false },
       ),
-      execute: async ({ product, resultsPerQuery }, _config, { api, signal }) => {
+      execute: async ({ product, resultsPerQuery, preferredDomains }, _config, { api, signal }) => {
         const searchClient = new OpenClawSearchClient(({ args, signal: searchSignal }) =>
           api.runtime.webSearch.search({
             config: api.config,
@@ -258,13 +261,17 @@ const inventoryToolPlugin = defineToolPlugin({
             signal: searchSignal,
           }),
         );
-        return discoverRetailers(product, searchClient, { resultsPerQuery, signal });
+        return discoverRetailers(product, searchClient, {
+          resultsPerQuery,
+          preferredDomains,
+          signal,
+        });
       },
     }),
     tool({
       name: "check_inventory",
       description:
-        "Check a retailer product URL with an active deterministic adapter. Unknown, blocked, and errors are never treated as out of stock.",
+        "Check one product URL using an active deterministic adapter. Unsupported, blocked, and inconclusive responses are never treated as out of stock and include a recommended next action.",
       parameters: Type.Object(
         {
           url: Type.String({ format: "uri", description: "Absolute retailer product URL." }),
@@ -291,7 +298,7 @@ const inventoryToolPlugin = defineToolPlugin({
     tool({
       name: "inspect_retailer",
       description:
-        "Perform read-only static HTTP inspection. Prefer JSON-LD, report blocks safely, and recommend network inspection when static evidence is insufficient.",
+        "Safely inspect a public product page using static HTTP and structured metadata. Report identity evidence, observed availability, adapter readiness, blocking, and the next action; this does not guarantee current stock.",
       parameters: Type.Object(
         {
           url: Type.String({ format: "uri" }),
@@ -308,7 +315,7 @@ const inventoryToolPlugin = defineToolPlugin({
     tool({
       name: "generate_retailer_adapter",
       description:
-        "Generate an untrusted candidate adapter from high-confidence JSON-LD observations. Uses a strict read-only template and never activates or writes the candidate.",
+        "Generate and persist an inactive deterministic adapter candidate only from conclusive, high-confidence JSON-LD evidence. The candidate remains untrusted and is never activated automatically.",
       parameters: Type.Object(
         {
           domain: Type.String(),
@@ -337,7 +344,7 @@ const inventoryToolPlugin = defineToolPlugin({
     tool({
       name: "validate_retailer_adapter",
       description:
-        "Validate a candidate adapter with strict source policy, a sanitized fixture, a live check, and a high-confidence observation cross-check. Validation never promotes the adapter.",
+        "Validate an exact candidate against source policy, a sanitized fixture, live evidence, and the originating observation. Returns every gate result and remediation errors; validation never activates the adapter.",
       parameters: Type.Object(
         {
           candidate: candidateSchema,
@@ -393,7 +400,7 @@ const inventoryToolPlugin = defineToolPlugin({
     }),
     tool({
       name: "inventory_adapter_list",
-      description: "List generated adapter candidates, validation state, active versions, and approval history.",
+      description: "Read adapter candidates, validation gates, exact fingerprints, active versions, activation readiness, and approval history.",
       parameters: Type.Object(
         { adapterId: Type.Optional(Type.String({ minLength: 1 })) },
         { additionalProperties: false },
@@ -410,7 +417,7 @@ const inventoryToolPlugin = defineToolPlugin({
     }),
     tool({
       name: "inventory_adapter_approve",
-      description: "Explicitly activate one exact validated adapter candidate and source fingerprint.",
+      description: "Explicitly activate one exact validated candidate and fingerprint for future runs only; every validation gate must be promotable.",
       parameters: Type.Object(
         {
           candidateId: Type.String({ minLength: 1 }),
@@ -433,7 +440,7 @@ const inventoryToolPlugin = defineToolPlugin({
     }),
     tool({
       name: "inventory_adapter_revoke",
-      description: "Explicitly disable one exact active generated adapter version.",
+      description: "Explicitly revoke one exact active adapter version for future runs while preserving watches and observation history.",
       parameters: Type.Object(
         {
           adapterId: Type.String({ minLength: 1 }),
@@ -457,7 +464,7 @@ const inventoryToolPlugin = defineToolPlugin({
     tool({
       name: "inventory_watch_add",
       description:
-        "Persist a product watch and its known retailer URLs. Discovery is not run by this tool.",
+        "Persist a reviewed product watch and direct retailer URLs, returning active-adapter readiness for every target. This does not enable scheduled monitoring or run discovery.",
       parameters: Type.Object(
         {
           product: productIdentitySchema,
@@ -487,16 +494,34 @@ const inventoryToolPlugin = defineToolPlugin({
     }),
     tool({
       name: "inventory_watch_remove",
-      description: "Remove one persisted inventory watch and its observation history.",
+      description: "Disable a watch by default. Permanent deletion of the watch and its observation history requires explicit confirmation.",
       parameters: Type.Object(
-        { watchId: Type.String({ minLength: 1 }) },
+        {
+          watchId: Type.String({ minLength: 1 }),
+          permanent: Type.Optional(Type.Boolean({ default: false })),
+          confirmDeletion: Type.Optional(Type.Literal(true)),
+        },
         { additionalProperties: false },
       ),
-      execute: async ({ watchId }, config, { api, signal }) => {
+      execute: async ({ watchId, permanent, confirmDeletion }, config, { api, signal }) => {
         signal?.throwIfAborted();
+        if (permanent && confirmDeletion !== true) {
+          return {
+            watchId,
+            disabled: false,
+            removed: false,
+            error: {
+              code: "WATCH_DELETION_CONFIRMATION_REQUIRED",
+              message: "Permanent deletion requires confirmDeletion: true.",
+            },
+          };
+        }
         const database = openInventoryDatabase(api, config.persistence?.databasePath);
         try {
-          return new WatchService(database, adapterRegistry).remove(watchId, { signal });
+          return new WatchService(database, adapterRegistry).remove(watchId, {
+            permanent,
+            signal,
+          });
         } finally {
           database.close();
         }
@@ -505,7 +530,7 @@ const inventoryToolPlugin = defineToolPlugin({
     tool({
       name: "inventory_watch_status",
       description:
-        "Return one persisted watch, or all watches when watchId is omitted, including each target's latest result.",
+        "Read one or all watches, including enabled state, active-adapter coverage, and each target's latest observation.",
       parameters: Type.Object(
         { watchId: Type.Optional(Type.String({ minLength: 1 })) },
         { additionalProperties: false },
@@ -525,7 +550,7 @@ const inventoryToolPlugin = defineToolPlugin({
     tool({
       name: "inventory_watch_run",
       description:
-        "Run the fast loop once for a persisted watch using active deterministic adapters only. Retailer failures are isolated and discovery is never invoked.",
+        "Run one persisted watch using active deterministic adapters only. Persist observations, isolate target failures, optionally suppress notifications for testing, and never invoke discovery or generation.",
       parameters: Type.Object(
         {
           watchId: Type.String({ minLength: 1 }),
@@ -533,11 +558,12 @@ const inventoryToolPlugin = defineToolPlugin({
             Type.Number({ minimum: 1, maximum: 60_000, default: 10_000 }),
           ),
           notifyWhenUnavailable: Type.Optional(Type.Boolean({ default: false })),
+          deliverNotifications: Type.Optional(Type.Boolean({ default: true })),
         },
         { additionalProperties: false },
       ),
       execute: async (
-        { watchId, timeoutMs, notifyWhenUnavailable },
+        { watchId, timeoutMs, notifyWhenUnavailable, deliverNotifications },
         config,
         { api, signal },
       ) => {
@@ -553,7 +579,7 @@ const inventoryToolPlugin = defineToolPlugin({
             timeoutMs,
             notifyWhenUnavailable,
             signal,
-            ...(discord?.enabled
+            ...(discord?.enabled && deliverNotifications !== false
               ? {
                   notification: {
                     channel: "discord",
@@ -571,12 +597,16 @@ const inventoryToolPlugin = defineToolPlugin({
     }),
     tool({
       name: "inventory_monitor_status",
-      description: "Show Phase 5 scheduler configuration, recent runs, and notification outbox counts.",
+      description: "Report scheduler configuration, database health, active-adapter coverage, recent fast and slow runs, and notification queue status.",
       parameters: Type.Object({}, { additionalProperties: false }),
       execute: async (_input, config, { api }) => {
         const parsed = parseInventoryBotConfig(config);
         const database = openInventoryDatabase(api, parsed.persistence?.databasePath);
         try {
+          const watches = database.listWatches();
+          const registry = activeAdapterRegistry(api, database);
+          const targets = watches.flatMap(({ retailers }) => retailers);
+          const coveredTargets = targets.filter(({ url }) => registry.get(url)).length;
           return {
             schemaVersion: database.schemaVersion(),
             database: database.healthStatus(),
@@ -585,6 +615,12 @@ const inventoryToolPlugin = defineToolPlugin({
               fastIntervalSeconds: parsed.monitoring.fastIntervalSeconds,
               slowIntervalHours: parsed.monitoring.slowIntervalHours,
               discordEnabled: parsed.notifications.discord?.enabled === true,
+            },
+            adapterCoverage: {
+              watches: watches.length,
+              targets: targets.length,
+              coveredTargets,
+              uncoveredTargets: targets.length - coveredTargets,
             },
             recentRuns: database.monitorStatus(),
             notifications: database.notificationStatus(),
@@ -597,29 +633,58 @@ const inventoryToolPlugin = defineToolPlugin({
     tool({
       name: "inventory_monitor_run_fast",
       description:
-        "Run the deterministic fast loop for all enabled watches and deliver queued notifications.",
-      parameters: Type.Object({}, { additionalProperties: false }),
-      execute: async (_input, _config, { api, signal }) => createMonitor(api).runFast({ signal }),
+        "Run the fast inventory loop using active adapters only. Persist observations, never perform discovery or generation, and allow notification delivery to be suppressed for testing.",
+      parameters: Type.Object(
+        { deliverNotifications: Type.Optional(Type.Boolean({ default: true })) },
+        { additionalProperties: false },
+      ),
+      execute: async ({ deliverNotifications }, _config, { api, signal }) =>
+        createMonitor(api).runFast({ signal, deliverNotifications }),
     }),
     tool({
       name: "inventory_monitor_run_slow",
       description:
-        "Run stale discovery and inspect repeatedly unknown or failing targets. Generated adapters remain approval-required.",
+        "Run bounded stale discovery and inspection. Persist retailer and inactive adapter candidates, but never add watch targets or activate adapters automatically.",
       parameters: Type.Object({}, { additionalProperties: false }),
       execute: async (_input, _config, { api, signal }) => createMonitor(api).runSlow({ signal }),
     }),
     tool({
       name: "inventory_notification_test",
-      description: "Submit one test notification through OpenClaw's durable Discord delivery queue.",
+      description: "Preview or send a real test notification through OpenClaw's durable Discord queue. Actual delivery requires confirmSend: true.",
       optional: true,
-      parameters: Type.Object({}, { additionalProperties: false }),
-      execute: async (_input, config, { api, signal }) => {
+      parameters: Type.Object(
+        {
+          dryRun: Type.Optional(Type.Boolean({ default: true })),
+          confirmSend: Type.Optional(Type.Literal(true)),
+        },
+        { additionalProperties: false },
+      ),
+      execute: async ({ dryRun, confirmSend }, config, { api, signal }) => {
         const parsed = parseInventoryBotConfig(config);
         const discord = parsed.notifications.discord;
         if (!discord?.enabled) {
           return {
             delivered: false,
             error: { code: "DISCORD_NOT_CONFIGURED", message: "Enable notifications.discord." },
+          };
+        }
+        const preview = {
+          channel: "discord",
+          target: discord.target,
+          accountId: discord.accountId,
+          threadId: discord.threadId,
+          message: "InventoryBot test notification",
+        };
+        if (dryRun !== false) return { dryRun: true, delivered: false, preview };
+        if (confirmSend !== true) {
+          return {
+            dryRun: false,
+            delivered: false,
+            preview,
+            error: {
+              code: "NOTIFICATION_TEST_CONFIRMATION_REQUIRED",
+              message: "Sending a real test notification requires confirmSend: true.",
+            },
           };
         }
         const channel = new OpenClawDiscordChannel(api.config, {
@@ -644,6 +709,7 @@ const inventoryToolPlugin = defineToolPlugin({
           accepted: result.status === "delivered" || result.status === "handed_off",
           delivered: result.status === "delivered",
           delivery: result,
+          preview,
         };
       },
     }),

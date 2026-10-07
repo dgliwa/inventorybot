@@ -7,6 +7,9 @@ export type InventoryWatchTarget = {
   url: string;
   enabled: boolean;
   latestResult?: InventoryResult;
+  adapterReady?: boolean;
+  adapterId?: string;
+  adapterVersion?: string;
 };
 
 export type InventoryWatch = {

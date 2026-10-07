@@ -266,6 +266,10 @@ export class InventoryDatabase {
     `).all();
         return rows.map((row) => this.hydrateWatch(row));
     }
+    disableWatch(id) {
+        const result = this.#database.prepare("UPDATE inventory_watches SET enabled = 0 WHERE id = ? AND enabled = 1").run(id);
+        return result.changes > 0;
+    }
     removeWatch(id) {
         const row = this.#database.prepare("SELECT product_id FROM inventory_watches WHERE id = ?").get(id);
         if (!row)

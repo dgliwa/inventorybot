@@ -89,7 +89,7 @@ export class InventoryMonitor {
         if (this.#fastRun)
             return this.#fastRun;
         const signal = this.combineWithLifecycleSignal(options.signal);
-        this.#fastRun = this.executeFast(signal).finally(() => {
+        this.#fastRun = this.executeFast(signal, options.deliverNotifications !== false).finally(() => {
             this.#fastRun = undefined;
         });
         return this.#fastRun;
@@ -139,7 +139,7 @@ export class InventoryMonitor {
         }, delayMs + jitterMs);
         this.#slowTimer.unref?.();
     }
-    async executeFast(signal) {
+    async executeFast(signal, deliverNotifications) {
         signal?.throwIfAborted();
         const database = this.#databaseFactory();
         const startedAt = this.#now().toISOString();
@@ -151,7 +151,7 @@ export class InventoryMonitor {
             let watchFailures = 0;
             let notificationsRecommended = 0;
             const discord = this.#config.notifications.discord;
-            const notification = discord?.enabled
+            const notification = discord?.enabled && deliverNotifications
                 ? {
                     channel: "discord",
                     target: discord.target,
@@ -180,11 +180,13 @@ export class InventoryMonitor {
                 }
             });
             signal?.throwIfAborted();
-            const delivery = await new NotificationDispatcher(database, this.#channels, {
-                maxAttempts: this.#config.notifications.maxAttempts,
-                batchSize: this.#config.notifications.batchSize,
-                baseRetryMs: this.#config.notifications.baseRetrySeconds * 1_000,
-            }, this.#now).dispatch({ signal });
+            const delivery = deliverNotifications
+                ? await new NotificationDispatcher(database, this.#channels, {
+                    maxAttempts: this.#config.notifications.maxAttempts,
+                    batchSize: this.#config.notifications.batchSize,
+                    baseRetryMs: this.#config.notifications.baseRetrySeconds * 1_000,
+                }, this.#now).dispatch({ signal })
+                : { claimed: 0, sent: 0, failed: 0, terminal: 0 };
             const summary = {
                 watches: watches.length,
                 checkedTargets,

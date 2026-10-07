@@ -33,12 +33,15 @@ export declare class WatchService {
         signal?: AbortSignal;
     }): InventoryWatch;
     remove(watchId: string, options?: {
+        permanent?: boolean;
         signal?: AbortSignal;
     }): {
         watchId: string;
+        disabled: boolean;
         removed: boolean;
     };
     status(watchId?: string): InventoryWatch | InventoryWatch[] | undefined;
+    private withAdapterReadiness;
     run(watchId: string, options?: {
         timeoutMs?: number;
         notifyWhenUnavailable?: boolean;

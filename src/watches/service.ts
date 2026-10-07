@@ -72,23 +72,47 @@ export class WatchService {
     }
     const createdAt = this.now().toISOString();
     options.signal?.throwIfAborted();
-    return this.database.createWatch({
+    return this.withAdapterReadiness(this.database.createWatch({
       id: randomUUID(),
       productId: randomUUID(),
       product: input.product,
       targets: [...uniqueTargets.values()].map((target) => ({ id: randomUUID(), ...target })),
       enabled: input.enabled ?? true,
       createdAt,
-    });
+    }));
   }
 
-  remove(watchId: string, options: { signal?: AbortSignal } = {}): { watchId: string; removed: boolean } {
+  remove(
+    watchId: string,
+    options: { permanent?: boolean; signal?: AbortSignal } = {},
+  ): { watchId: string; disabled: boolean; removed: boolean } {
     options.signal?.throwIfAborted();
-    return { watchId, removed: this.database.removeWatch(watchId) };
+    if (options.permanent) {
+      return { watchId, disabled: false, removed: this.database.removeWatch(watchId) };
+    }
+    return { watchId, disabled: this.database.disableWatch(watchId), removed: false };
   }
 
   status(watchId?: string): InventoryWatch | InventoryWatch[] | undefined {
-    return watchId ? this.database.getWatch(watchId) : this.database.listWatches();
+    if (watchId) {
+      const watch = this.database.getWatch(watchId);
+      return watch ? this.withAdapterReadiness(watch) : undefined;
+    }
+    return this.database.listWatches().map((watch) => this.withAdapterReadiness(watch));
+  }
+
+  private withAdapterReadiness(watch: InventoryWatch): InventoryWatch {
+    return {
+      ...watch,
+      retailers: watch.retailers.map((target) => {
+        const adapter = this.registry.get(target.url);
+        return {
+          ...target,
+          adapterReady: Boolean(adapter),
+          ...(adapter ? { adapterId: adapter.id, adapterVersion: adapter.version } : {}),
+        };
+      }),
+    };
   }
 
   async run(

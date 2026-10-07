@@ -170,6 +170,9 @@ describe("InventoryMonitor", () => {
       observations: [],
       sanitizedFixture: { kind: "json_ld" as const, html: "<script></script>", sha256: "a".repeat(64) },
       nextRecommendedLevel: "none" as const,
+      adapterReadiness: "ready_for_generation" as const,
+      identityVerified: true,
+      nextAction: "Generate and validate an inactive deterministic adapter candidate.",
     }));
     const validate = vi.fn(async (candidate: AdapterCandidate) => ({
       candidateId: candidate.candidateId,

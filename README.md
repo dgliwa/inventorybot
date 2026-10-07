@@ -113,7 +113,21 @@ Revocation requires both the adapter ID and exact active candidate ID plus `conf
 - `inventory_watch_status`
 - `inventory_watch_run`
 
-Example:
+Discovery searches exact identifiers first, then uses a supplied product name and optional `preferredDomains` for fallback and retailer-specific searches. Candidate confidence describes product-identity evidence; `preferred` describes operator retailer priority. Neither field verifies current stock. Codex-hosted citation results and structured search results are both supported.
+
+Example discovery input:
+
+```json
+{
+  "product": {
+    "name": "Example Synth",
+    "upc": "012345678905"
+  },
+  "preferredDomains": ["target.com", "bestbuy.com"]
+}
+```
+
+Example watch input:
 
 ```json
 {
@@ -130,10 +144,12 @@ Example:
 
 ### Monitoring
 
-- `inventory_monitor_status` — show configuration, SQLite integrity/file/table metrics, recent fast/slow runs, and outbox counts
-- `inventory_monitor_run_fast` — run every enabled watch and drain notification delivery
+- `inventory_monitor_status` — show configuration, SQLite integrity/file/table metrics, adapter coverage, recent fast/slow runs, and outbox counts
+- `inventory_monitor_run_fast` — run every enabled watch; use `deliverNotifications: false` for a notification-suppressed smoke test
 - `inventory_monitor_run_slow` — run stale discovery and inspect repeatedly uncertain targets
-- `inventory_notification_test` — optional, side-effecting Discord delivery test
+- `inventory_notification_test` — previews by default; sending a real Discord test requires `dryRun: false` and `confirmSend: true`
+
+`inventory_watch_remove` disables a watch by default and preserves its history. Permanent deletion requires both `permanent: true` and `confirmDeletion: true`. Watch add/status results report whether each target currently has an active adapter.
 
 ## Fast loop
 

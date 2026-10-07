@@ -54,6 +54,7 @@ export declare class InventoryDatabase {
     createWatch(record: CreateWatchRecord): InventoryWatch;
     getWatch(id: string): InventoryWatch | undefined;
     listWatches(): InventoryWatch[];
+    disableWatch(id: string): boolean;
     removeWatch(id: string): boolean;
     latestStatus(targetId: string): InventoryStatus | undefined;
     recordObservation(input: {

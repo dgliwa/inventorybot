@@ -86,6 +86,11 @@ describe("WatchService", () => {
       });
       expect(watch.product).toEqual({ name: "Test Product", sku: "SKU-42" });
       expect(watch.retailers).toHaveLength(1);
+      expect(watch.retailers[0]).toMatchObject({
+        adapterReady: true,
+        adapterId: "sequence-adapter",
+        adapterVersion: "1.0.0",
+      });
       expect(service.status(watch.id)).toMatchObject({ id: watch.id, enabled: true });
       expect(service.status()).toHaveLength(1);
     } finally {
@@ -214,15 +219,24 @@ describe("WatchService", () => {
     }
   });
 
-  it("removes a watch and reports missing watches", () => {
+  it("disables by default and permanently removes only when requested", () => {
     const { database, service } = createService();
     try {
       const watch = service.add({
         product: { sku: "SKU-42" },
         retailers: [{ url: "https://shop.example.test/product/42" }],
       });
-      expect(service.remove(watch.id)).toEqual({ watchId: watch.id, removed: true });
-      expect(service.remove(watch.id)).toEqual({ watchId: watch.id, removed: false });
+      expect(service.remove(watch.id)).toEqual({
+        watchId: watch.id,
+        disabled: true,
+        removed: false,
+      });
+      expect(service.status(watch.id)).toMatchObject({ enabled: false });
+      expect(service.remove(watch.id, { permanent: true })).toEqual({
+        watchId: watch.id,
+        disabled: false,
+        removed: true,
+      });
       expect(service.status(watch.id)).toBeUndefined();
     } finally {
       database.close();

@@ -56,6 +56,7 @@ export declare class InventoryMonitor {
     };
     runFast(options?: {
         signal?: AbortSignal;
+        deliverNotifications?: boolean;
     }): Promise<FastMonitorSummary>;
     runSlow(options?: {
         signal?: AbortSignal;
