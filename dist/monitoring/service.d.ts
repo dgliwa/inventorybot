@@ -4,7 +4,7 @@ import { validateRetailerAdapter } from "../generation/validate-adapter.js";
 import { inspectRetailerStatic } from "../inspection/static.js";
 import type { NotificationChannel } from "../notifications/types.js";
 import type { InventoryDatabase } from "../persistence/db.js";
-import type { SearchWatchRunResult } from "../search-watches/types.js";
+import type { DeterministicSearchClient, SearchWatchRunResult } from "../search-watches/types.js";
 import type { InventoryBotConfig } from "./config.js";
 export type FastMonitorSummary = {
     watches: number;
@@ -53,6 +53,7 @@ type MonitorDependencies = {
     registryFactory?: (database: InventoryDatabase) => AdapterRegistry;
     config: InventoryBotConfig;
     searchClient?: RetailerSearchClient;
+    deterministicSearchClient: DeterministicSearchClient;
     notificationChannels?: ReadonlyMap<string, NotificationChannel>;
     inspect?: typeof inspectRetailerStatic;
     validate?: typeof validateRetailerAdapter;

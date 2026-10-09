@@ -8,6 +8,7 @@ import type { AdapterCandidate, AdapterValidationReport } from "../generation/ty
 import type { RetailerInspection } from "../inspection/types.js";
 import type { NotificationPayload, PendingNotification } from "../notifications/types.js";
 import type {
+  DeterministicSearchAdapter,
   RetailerSearchWatch,
   RetailerSearchWatchResult,
 } from "../search-watches/types.js";
@@ -46,6 +47,7 @@ type SearchWatchRow = {
   cadence_minutes: number;
   enabled: number;
   notify_on_initial_results: number;
+  adapter_json: string | null;
   created_at: string;
   updated_at: string;
   last_checked_at: string | null;
@@ -60,6 +62,9 @@ function hydrateSearchWatch(row: SearchWatchRow): RetailerSearchWatch {
     cadenceMinutes: Number(row.cadence_minutes),
     enabled: row.enabled === 1,
     notifyOnInitialResults: row.notify_on_initial_results === 1,
+    ...(row.adapter_json
+      ? { adapter: JSON.parse(row.adapter_json) as DeterministicSearchAdapter }
+      : {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(row.last_checked_at ? { lastCheckedAt: row.last_checked_at } : {}),
@@ -174,7 +179,7 @@ export class InventoryDatabase {
     const version = this.#database.prepare("PRAGMA user_version").get() as {
       user_version: number;
     };
-    if (version.user_version > 5) {
+    if (version.user_version > 6) {
       throw new Error(`InventoryBot database schema ${version.user_version} is newer than supported schema 5.`);
     }
     this.#database.exec(`
@@ -406,6 +411,15 @@ export class InventoryDatabase {
         COMMIT;
       `);
     }
+    if (version.user_version < 6) {
+      this.#database.exec(`
+        BEGIN IMMEDIATE;
+        ALTER TABLE search_watches ADD COLUMN adapter_json TEXT;
+        UPDATE search_watches SET enabled = 0 WHERE adapter_json IS NULL;
+        PRAGMA user_version = 6;
+        COMMIT;
+      `);
+    }
   }
 
   createWatch(record: CreateWatchRecord): InventoryWatch {
@@ -479,8 +493,8 @@ export class InventoryDatabase {
     this.#database.prepare(`
       INSERT INTO search_watches(
         id, domain, query, cadence_minutes, enabled, notify_on_initial_results,
-        created_at, updated_at, last_checked_at, next_check_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        adapter_json, created_at, updated_at, last_checked_at, next_check_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       watch.id,
       watch.domain,
@@ -488,6 +502,7 @@ export class InventoryDatabase {
       watch.cadenceMinutes,
       watch.enabled ? 1 : 0,
       watch.notifyOnInitialResults ? 1 : 0,
+      watch.adapter ? JSON.stringify(watch.adapter) : null,
       watch.createdAt,
       watch.updatedAt,
       watch.lastCheckedAt ?? null,
@@ -499,7 +514,7 @@ export class InventoryDatabase {
   getSearchWatch(id: string): RetailerSearchWatch | undefined {
     const row = this.#database.prepare(`
       SELECT id, domain, query, cadence_minutes, enabled, notify_on_initial_results,
-             created_at, updated_at, last_checked_at, next_check_at
+             adapter_json, created_at, updated_at, last_checked_at, next_check_at
       FROM search_watches WHERE id = ?
     `).get(id) as SearchWatchRow | undefined;
     return row ? hydrateSearchWatch(row) : undefined;
@@ -508,7 +523,7 @@ export class InventoryDatabase {
   listSearchWatches(): RetailerSearchWatch[] {
     const rows = this.#database.prepare(`
       SELECT id, domain, query, cadence_minutes, enabled, notify_on_initial_results,
-             created_at, updated_at, last_checked_at, next_check_at
+             adapter_json, created_at, updated_at, last_checked_at, next_check_at
       FROM search_watches ORDER BY created_at ASC
     `).all() as unknown as SearchWatchRow[];
     return rows.map(hydrateSearchWatch);
@@ -522,6 +537,7 @@ export class InventoryDatabase {
       cadenceMinutes?: number;
       enabled?: boolean;
       notifyOnInitialResults?: boolean;
+      adapter?: DeterministicSearchAdapter;
       updatedAt: string;
       resetBaseline?: boolean;
     },
@@ -534,7 +550,7 @@ export class InventoryDatabase {
       this.#database.prepare(`
         UPDATE search_watches SET
           domain = ?, query = ?, cadence_minutes = ?, enabled = ?,
-          notify_on_initial_results = ?, updated_at = ?,
+          notify_on_initial_results = ?, adapter_json = ?, updated_at = ?,
           last_checked_at = ?, next_check_at = ?
         WHERE id = ?
       `).run(
@@ -543,6 +559,11 @@ export class InventoryDatabase {
         changes.cadenceMinutes ?? current.cadenceMinutes,
         (changes.enabled ?? current.enabled) ? 1 : 0,
         (changes.notifyOnInitialResults ?? current.notifyOnInitialResults) ? 1 : 0,
+        changes.adapter
+          ? JSON.stringify(changes.adapter)
+          : current.adapter
+            ? JSON.stringify(current.adapter)
+            : null,
         changes.updatedAt,
         resetBaseline ? null : current.lastCheckedAt ?? null,
         resetBaseline ? null : current.nextCheckAt ?? null,

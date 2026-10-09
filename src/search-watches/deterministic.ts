@@ -1,0 +1,339 @@
+import { domainMatches, normalizeDomain } from "../adapters/url.js";
+import type { SearchResult } from "../discovery/types.js";
+import { assertPublicHttpUrl, type HostResolver } from "../inspection/url-safety.js";
+import type { DeterministicSearchAdapter, DeterministicSearchClient } from "./types.js";
+
+export type SearchFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+export class SearchAdapterDiscoveryError extends Error {
+  constructor(readonly code: string, message: string, readonly nextAction: string) {
+    super(message);
+    this.name = "SearchAdapterDiscoveryError";
+  }
+}
+
+function decodeHtml(value: string): string {
+  return value
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&#(\d+);/g, (_, code: string) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, code: string) => String.fromCodePoint(Number.parseInt(code, 16)));
+}
+
+function attributes(source: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  const pattern = /([:\w-]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
+  for (const match of source.matchAll(pattern)) {
+    result[match[1].toLowerCase()] = decodeHtml(match[2] ?? match[3] ?? match[4] ?? "");
+  }
+  return result;
+}
+
+function textContent(value: string): string {
+  return decodeHtml(value.replace(/<script\b[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style\b[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " "))
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function clean(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function matchesQuery(result: SearchResult, query: string): boolean {
+  const tokens = clean(query).split(" ").filter((token) => token.length > 1);
+  const haystack = clean(`${result.title ?? ""} ${result.snippet ?? ""} ${result.url}`);
+  return tokens.length > 0 && tokens.every((token) => haystack.includes(token));
+}
+
+async function readBounded(response: Response, maximumBytes = 5_000_000): Promise<string> {
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > maximumBytes) {
+    throw new SearchAdapterDiscoveryError(
+      "SEARCH_RESPONSE_TOO_LARGE",
+      `Retailer response exceeds ${maximumBytes} bytes.`,
+      "Use a narrower static search endpoint or add bounded API support.",
+    );
+  }
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let body = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maximumBytes) {
+      await reader.cancel();
+      throw new SearchAdapterDiscoveryError(
+        "SEARCH_RESPONSE_TOO_LARGE",
+        `Retailer response exceeds ${maximumBytes} bytes.`,
+        "Use a narrower static search endpoint or add bounded API support.",
+      );
+    }
+    body += decoder.decode(value, { stream: true });
+  }
+  return body + decoder.decode();
+}
+
+type DiscoveredForm = {
+  searchUrl: string;
+  queryParameter: string;
+  fixedParameters: Record<string, string>;
+};
+
+function discoverForm(html: string, pageUrl: string, domain: string): DiscoveredForm | undefined {
+  const candidates: Array<DiscoveredForm & { score: number }> = [];
+  for (const formMatch of html.matchAll(/<form\b([^>]*)>([\s\S]*?)<\/form>/gi)) {
+    const form = attributes(formMatch[1]);
+    if ((form.method || "get").toLowerCase() !== "get") continue;
+    const inputs = [...formMatch[2].matchAll(/<input\b([^>]*)>/gi)].map((match) => attributes(match[1]));
+    const queryInput = inputs
+      .map((input) => {
+        const name = input.name?.trim();
+        if (!name || input.disabled !== undefined) return undefined;
+        const type = (input.type || "text").toLowerCase();
+        const semantic = `${name} ${input.id ?? ""} ${input.placeholder ?? ""} ${input["aria-label"] ?? ""}`.toLowerCase();
+        const score = (type === "search" ? 10 : 0) + (/\b(q|query|search|keyword|keywords|term)\b/.test(semantic) ? 6 : 0);
+        return score > 0 ? { name, score } : undefined;
+      })
+      .filter((value): value is { name: string; score: number } => Boolean(value))
+      .sort((left, right) => right.score - left.score)[0];
+    if (!queryInput) continue;
+    const searchUrl = new URL(form.action || pageUrl, pageUrl);
+    if (!domainMatches(normalizeDomain(searchUrl.toString()), domain)) continue;
+    searchUrl.hash = "";
+    const fixedParameters: Record<string, string> = {};
+    for (const input of inputs) {
+      if (input.name && input.name !== queryInput.name && (input.type || "").toLowerCase() === "hidden" && input.value) {
+        fixedParameters[input.name] = input.value;
+      }
+    }
+    candidates.push({
+      searchUrl: searchUrl.toString(),
+      queryParameter: queryInput.name,
+      fixedParameters,
+      score: queryInput.score + (/search/i.test(form.role ?? "") ? 4 : 0),
+    });
+  }
+  return candidates.sort((left, right) => right.score - left.score)[0];
+}
+
+function productJsonLdResults(html: string, pageUrl: string, domain: string): SearchResult[] {
+  const results: SearchResult[] = [];
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    const object = value as Record<string, unknown>;
+    const type = String(object["@type"] ?? "").split("/").pop();
+    if (type === "Product" || type === "ListItem") {
+      const item = object.item && typeof object.item === "object"
+        ? object.item as Record<string, unknown>
+        : object;
+      const rawUrl = item.url ?? object.url;
+      if (typeof rawUrl === "string") {
+        try {
+          const url = new URL(rawUrl, pageUrl);
+          if (domainMatches(normalizeDomain(url.toString()), domain)) {
+            results.push({
+              url: url.toString(),
+              ...(typeof item.name === "string" ? { title: item.name } : {}),
+              ...(typeof item.description === "string" ? { snippet: textContent(item.description) } : {}),
+            });
+          }
+        } catch {
+          // Ignore malformed retailer data.
+        }
+      }
+    }
+    Object.values(object).forEach(visit);
+  };
+  for (const match of html.matchAll(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)) {
+    try {
+      visit(JSON.parse(match[1].trim()));
+    } catch {
+      // Ignore malformed blocks when other deterministic evidence is available.
+    }
+  }
+  return results;
+}
+
+function anchorResults(html: string, pageUrl: string, domain: string): SearchResult[] {
+  const results: SearchResult[] = [];
+  for (const match of html.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi)) {
+    const attrs = attributes(match[1]);
+    if (!attrs.href || /^(#|javascript:|mailto:|tel:)/i.test(attrs.href)) continue;
+    try {
+      const url = new URL(attrs.href, pageUrl);
+      if (!domainMatches(normalizeDomain(url.toString()), domain)) continue;
+      const title = textContent(match[2]) || attrs.title || attrs["aria-label"];
+      if (!title) continue;
+      results.push({ url: url.toString(), title });
+    } catch {
+      // Ignore malformed links.
+    }
+  }
+  return results;
+}
+
+function parseResults(html: string, pageUrl: string, domain: string, query: string, count: number): SearchResult[] {
+  const unique = new Map<string, SearchResult>();
+  for (const result of [...productJsonLdResults(html, pageUrl, domain), ...anchorResults(html, pageUrl, domain)]) {
+    if (!matchesQuery(result, query)) continue;
+    try {
+      const url = new URL(result.url);
+      url.hash = "";
+      if (url.toString() === pageUrl) continue;
+      unique.set(url.toString(), { ...result, url: url.toString() });
+    } catch {
+      // Ignore malformed links.
+    }
+    if (unique.size >= count) break;
+  }
+  return [...unique.values()];
+}
+
+export class DirectRetailerSearchClient implements DeterministicSearchClient {
+  constructor(
+    private readonly fetchImpl: SearchFetch = fetch,
+    private readonly resolver?: HostResolver,
+    private readonly now: () => Date = () => new Date(),
+  ) {}
+
+  async discover(domain: string, query: string, signal?: AbortSignal): Promise<{ adapter: DeterministicSearchAdapter; results: SearchResult[] }> {
+    const normalizedDomain = normalizeDomain(domain.includes("://") ? domain : `https://${domain}`);
+    const homepage = await assertPublicHttpUrl(`https://${normalizedDomain}/`, this.resolver);
+    const homepageResponse = await this.fetchPage(homepage.toString(), signal);
+    const form = discoverForm(homepageResponse.html, homepageResponse.url, normalizedDomain);
+    if (!form) {
+      throw new SearchAdapterDiscoveryError(
+        "SEARCH_FORM_NOT_FOUND",
+        `No deterministic GET search form was found on ${normalizedDomain}.`,
+        "The retailer may require JavaScript, authentication, a POST request, or a retailer-specific search adapter.",
+      );
+    }
+    const provisional: DeterministicSearchAdapter = {
+      version: 1,
+      domain: normalizedDomain,
+      searchUrl: form.searchUrl,
+      queryParameter: form.queryParameter,
+      fixedParameters: form.fixedParameters,
+      parser: "html_links",
+      validatedAt: this.now().toISOString(),
+      validationResultCount: 0,
+    };
+    const first = await this.search(provisional, query, 50, signal);
+    if (first.length === 0) {
+      throw new SearchAdapterDiscoveryError(
+        "SEARCH_RESULTS_NOT_PARSEABLE",
+        `The discovered search endpoint returned no reliably matching product links for “${query}”.`,
+        "Verify that the retailer has matching products or add a retailer-specific parser for its result markup.",
+      );
+    }
+    const second = await this.search(provisional, query, 50, signal);
+    const repeated = new Set(second.map((result) => result.url));
+    if (!first.some((result) => repeated.has(result.url))) {
+      throw new SearchAdapterDiscoveryError(
+        "SEARCH_ADAPTER_VALIDATION_FAILED",
+        "Repeated live searches did not return any stable matching product URL.",
+        "Retry later or inspect the retailer for dynamic, personalized, or blocked search results.",
+      );
+    }
+    return {
+      adapter: { ...provisional, validationResultCount: first.length },
+      results: first,
+    };
+  }
+
+  async search(adapter: DeterministicSearchAdapter, query: string, count: number, signal?: AbortSignal): Promise<SearchResult[]> {
+    if (adapter.version !== 1 || adapter.parser !== "html_links") {
+      throw new Error("Unsupported deterministic search adapter version or parser.");
+    }
+    const url = new URL(adapter.searchUrl);
+    for (const [key, value] of Object.entries(adapter.fixedParameters)) url.searchParams.set(key, value);
+    url.searchParams.set(adapter.queryParameter, query);
+    const page = await this.fetchPage(url.toString(), signal);
+    if (!domainMatches(normalizeDomain(page.url), adapter.domain)) {
+      throw new SearchAdapterDiscoveryError(
+        "SEARCH_REDIRECTED_OFF_DOMAIN",
+        `Retailer search redirected outside ${adapter.domain}.`,
+        "Inspect the retailer's current search endpoint before enabling this watch.",
+      );
+    }
+    return parseResults(page.html, page.url, adapter.domain, query, count);
+  }
+
+  private async fetchPage(url: string, signal?: AbortSignal): Promise<{ url: string; html: string }> {
+    const timeoutSignal = AbortSignal.timeout(15_000);
+    const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+    let currentUrl = url;
+    let response: Response | undefined;
+    for (let redirect = 0; redirect <= 5; redirect += 1) {
+      await assertPublicHttpUrl(currentUrl, this.resolver);
+      response = await this.fetchImpl(currentUrl, {
+        method: "GET",
+        redirect: "manual",
+        signal: requestSignal,
+        headers: {
+          accept: "text/html,application/xhtml+xml",
+          "user-agent": "InventoryBot/0.1 deterministic-search-monitor",
+        },
+      });
+      if (![301, 302, 303, 307, 308].includes(response.status)) break;
+      const location = response.headers.get("location");
+      if (!location) break;
+      currentUrl = new URL(location, currentUrl).toString();
+      response = undefined;
+    }
+    if (!response) {
+      throw new SearchAdapterDiscoveryError(
+        "SEARCH_TOO_MANY_REDIRECTS",
+        "Retailer search exceeded five redirects.",
+        "Inspect the retailer's current canonical search endpoint.",
+      );
+    }
+    await assertPublicHttpUrl(response.url || currentUrl, this.resolver);
+    if (response.status === 403 || response.status === 429) {
+      throw new SearchAdapterDiscoveryError(
+        "SEARCH_SITE_BLOCKED",
+        `Retailer search was blocked with HTTP ${response.status}.`,
+        "Do not bypass the challenge; use a supported retailer API or retry after the block clears.",
+      );
+    }
+    if (!response.ok) {
+      throw new SearchAdapterDiscoveryError(
+        "SEARCH_HTTP_ERROR",
+        `Retailer search returned HTTP ${response.status}.`,
+        "Verify the retailer is reachable and its search endpoint still exists.",
+      );
+    }
+    const contentType = response.headers.get("content-type") ?? "";
+    if (contentType && !/text\/html|application\/xhtml\+xml/i.test(contentType)) {
+      throw new SearchAdapterDiscoveryError(
+        "SEARCH_CONTENT_TYPE_UNSUPPORTED",
+        `Retailer returned unsupported content type ${contentType}.`,
+        "Add a retailer-specific API parser before registering this search monitor.",
+      );
+    }
+    const html = await readBounded(response);
+    const title = textContent(html.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? "");
+    const challengePage = /captcha|verify you are human|access denied/i.test(title) ||
+      (html.length < 200_000 && /verify you are human|access denied/i.test(html));
+    if (challengePage) {
+      throw new SearchAdapterDiscoveryError(
+        "SEARCH_SITE_BLOCKED",
+        "Retailer returned an access challenge page.",
+        "Do not bypass the challenge; add an approved retailer-specific integration instead.",
+      );
+    }
+    return { url: response.url || currentUrl, html };
+  }
+}

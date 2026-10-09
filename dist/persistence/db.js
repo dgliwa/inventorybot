@@ -9,6 +9,9 @@ function hydrateSearchWatch(row) {
         cadenceMinutes: Number(row.cadence_minutes),
         enabled: row.enabled === 1,
         notifyOnInitialResults: row.notify_on_initial_results === 1,
+        ...(row.adapter_json
+            ? { adapter: JSON.parse(row.adapter_json) }
+            : {}),
         createdAt: row.created_at,
         updatedAt: row.updated_at,
         ...(row.last_checked_at ? { lastCheckedAt: row.last_checked_at } : {}),
@@ -89,7 +92,7 @@ export class InventoryDatabase {
     }
     migrate() {
         const version = this.#database.prepare("PRAGMA user_version").get();
-        if (version.user_version > 5) {
+        if (version.user_version > 6) {
             throw new Error(`InventoryBot database schema ${version.user_version} is newer than supported schema 5.`);
         }
         this.#database.exec(`
@@ -322,6 +325,15 @@ export class InventoryDatabase {
         COMMIT;
       `);
         }
+        if (version.user_version < 6) {
+            this.#database.exec(`
+        BEGIN IMMEDIATE;
+        ALTER TABLE search_watches ADD COLUMN adapter_json TEXT;
+        UPDATE search_watches SET enabled = 0 WHERE adapter_json IS NULL;
+        PRAGMA user_version = 6;
+        COMMIT;
+      `);
+        }
     }
     createWatch(record) {
         this.#database.exec("BEGIN IMMEDIATE;");
@@ -382,15 +394,15 @@ export class InventoryDatabase {
         this.#database.prepare(`
       INSERT INTO search_watches(
         id, domain, query, cadence_minutes, enabled, notify_on_initial_results,
-        created_at, updated_at, last_checked_at, next_check_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(watch.id, watch.domain, watch.query, watch.cadenceMinutes, watch.enabled ? 1 : 0, watch.notifyOnInitialResults ? 1 : 0, watch.createdAt, watch.updatedAt, watch.lastCheckedAt ?? null, watch.nextCheckAt ?? null);
+        adapter_json, created_at, updated_at, last_checked_at, next_check_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(watch.id, watch.domain, watch.query, watch.cadenceMinutes, watch.enabled ? 1 : 0, watch.notifyOnInitialResults ? 1 : 0, watch.adapter ? JSON.stringify(watch.adapter) : null, watch.createdAt, watch.updatedAt, watch.lastCheckedAt ?? null, watch.nextCheckAt ?? null);
         return this.getSearchWatch(watch.id);
     }
     getSearchWatch(id) {
         const row = this.#database.prepare(`
       SELECT id, domain, query, cadence_minutes, enabled, notify_on_initial_results,
-             created_at, updated_at, last_checked_at, next_check_at
+             adapter_json, created_at, updated_at, last_checked_at, next_check_at
       FROM search_watches WHERE id = ?
     `).get(id);
         return row ? hydrateSearchWatch(row) : undefined;
@@ -398,7 +410,7 @@ export class InventoryDatabase {
     listSearchWatches() {
         const rows = this.#database.prepare(`
       SELECT id, domain, query, cadence_minutes, enabled, notify_on_initial_results,
-             created_at, updated_at, last_checked_at, next_check_at
+             adapter_json, created_at, updated_at, last_checked_at, next_check_at
       FROM search_watches ORDER BY created_at ASC
     `).all();
         return rows.map(hydrateSearchWatch);
@@ -413,10 +425,14 @@ export class InventoryDatabase {
             this.#database.prepare(`
         UPDATE search_watches SET
           domain = ?, query = ?, cadence_minutes = ?, enabled = ?,
-          notify_on_initial_results = ?, updated_at = ?,
+          notify_on_initial_results = ?, adapter_json = ?, updated_at = ?,
           last_checked_at = ?, next_check_at = ?
         WHERE id = ?
-      `).run(changes.domain ?? current.domain, changes.query ?? current.query, changes.cadenceMinutes ?? current.cadenceMinutes, (changes.enabled ?? current.enabled) ? 1 : 0, (changes.notifyOnInitialResults ?? current.notifyOnInitialResults) ? 1 : 0, changes.updatedAt, resetBaseline ? null : current.lastCheckedAt ?? null, resetBaseline ? null : current.nextCheckAt ?? null, id);
+      `).run(changes.domain ?? current.domain, changes.query ?? current.query, changes.cadenceMinutes ?? current.cadenceMinutes, (changes.enabled ?? current.enabled) ? 1 : 0, (changes.notifyOnInitialResults ?? current.notifyOnInitialResults) ? 1 : 0, changes.adapter
+                ? JSON.stringify(changes.adapter)
+                : current.adapter
+                    ? JSON.stringify(current.adapter)
+                    : null, changes.updatedAt, resetBaseline ? null : current.lastCheckedAt ?? null, resetBaseline ? null : current.nextCheckAt ?? null, id);
             if (resetBaseline) {
                 this.#database.prepare("DELETE FROM search_watch_results WHERE watch_id = ?").run(id);
             }

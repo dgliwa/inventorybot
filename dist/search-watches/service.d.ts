@@ -1,6 +1,6 @@
-import type { RetailerSearchClient } from "../discovery/types.js";
+import type { SearchResult } from "../discovery/types.js";
 import type { InventoryDatabase } from "../persistence/db.js";
-import type { RetailerSearchWatch, SearchWatchRunResult } from "./types.js";
+import type { DeterministicSearchClient, RetailerSearchWatch, SearchWatchRunResult } from "./types.js";
 export type SearchWatchNotificationTarget = {
     channel: string;
     target: string;
@@ -11,14 +11,17 @@ export declare class SearchWatchService {
     private readonly database;
     private readonly searchClient;
     private readonly now;
-    constructor(database: InventoryDatabase, searchClient: RetailerSearchClient, now?: () => Date);
+    constructor(database: InventoryDatabase, searchClient: DeterministicSearchClient, now?: () => Date);
     add(input: {
         domain: string;
         query: string;
         cadenceMinutes?: number;
         enabled?: boolean;
         notifyOnInitialResults?: boolean;
-    }): RetailerSearchWatch;
+        signal?: AbortSignal;
+    }): Promise<RetailerSearchWatch & {
+        validationResults: SearchResult[];
+    }>;
     update(input: {
         watchId: string;
         domain?: string;
@@ -26,7 +29,8 @@ export declare class SearchWatchService {
         cadenceMinutes?: number;
         enabled?: boolean;
         notifyOnInitialResults?: boolean;
-    }): RetailerSearchWatch | undefined;
+        signal?: AbortSignal;
+    }): Promise<RetailerSearchWatch | undefined>;
     status(watchId?: string): Array<RetailerSearchWatch & {
         recentResults: ReturnType<InventoryDatabase["listSearchWatchResults"]>;
     }>;

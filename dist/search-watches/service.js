@@ -13,19 +13,6 @@ function matchesInterest(result, query) {
     const tokens = interest.split(" ").filter((token) => token.length > 1);
     return tokens.length > 0 && tokens.every((token) => haystack.includes(token));
 }
-function cleanResultText(value) {
-    if (!value || /^<<ccr:[^>]+>>$/i.test(value.trim()))
-        return undefined;
-    const cleaned = value
-        .split("\n")
-        .filter((line) => !line.startsWith("<<<EXTERNAL_UNTRUSTED_CONTENT") &&
-        !line.startsWith("<<<END_EXTERNAL_UNTRUSTED_CONTENT") &&
-        !line.startsWith("Source: Web Search") &&
-        line.trim() !== "---")
-        .join("\n")
-        .trim();
-    return cleaned || undefined;
-}
 function canonicalResult(result, domain) {
     try {
         const url = new URL(result.url);
@@ -33,26 +20,21 @@ function canonicalResult(result, domain) {
             return undefined;
         url.hash = "";
         for (const key of [...url.searchParams.keys()]) {
-            if (key.toLowerCase().startsWith("utm_") || ["ref", "source", "campaign"].includes(key.toLowerCase())) {
+            if (key.toLowerCase().startsWith("utm_") || ["ref", "campaign"].includes(key.toLowerCase())) {
                 url.searchParams.delete(key);
             }
         }
         if (url.pathname.length > 1)
             url.pathname = url.pathname.replace(/\/+$/, "");
-        const title = cleanResultText(result.title);
-        const snippet = cleanResultText(result.snippet);
         return {
             url: url.toString(),
-            ...(title ? { title } : {}),
-            ...(snippet ? { snippet } : {}),
+            ...(result.title?.trim() ? { title: result.title.trim() } : {}),
+            ...(result.snippet?.trim() ? { snippet: result.snippet.trim() } : {}),
         };
     }
     catch {
         return undefined;
     }
-}
-function searchQuery(watch) {
-    return `site:${watch.domain} "${watch.query.replaceAll('"', " ").trim()}"`;
 }
 export class SearchWatchService {
     database;
@@ -63,8 +45,7 @@ export class SearchWatchService {
         this.searchClient = searchClient;
         this.now = now;
     }
-    add(input) {
-        const now = this.now().toISOString();
+    async add(input) {
         const domain = normalizeDomain(input.domain.includes("://") ? input.domain : `https://${input.domain}`);
         const query = input.query.trim();
         if (!query)
@@ -73,39 +54,49 @@ export class SearchWatchService {
         if (!Number.isInteger(cadenceMinutes) || cadenceMinutes < 5) {
             throw new Error("Search cadence must be an integer of at least 5 minutes.");
         }
-        return this.database.createSearchWatch({
+        input.signal?.throwIfAborted();
+        const discovery = await this.searchClient.discover(domain, query, input.signal);
+        input.signal?.throwIfAborted();
+        const now = this.now().toISOString();
+        const watch = this.database.createSearchWatch({
             id: randomUUID(),
             domain,
             query,
             cadenceMinutes,
             enabled: input.enabled ?? true,
             notifyOnInitialResults: input.notifyOnInitialResults ?? false,
+            adapter: discovery.adapter,
             createdAt: now,
             updatedAt: now,
         });
+        return { ...watch, validationResults: discovery.results };
     }
-    update(input) {
+    async update(input) {
         const current = this.database.getSearchWatch(input.watchId);
         if (!current)
             return undefined;
         const domain = input.domain === undefined
-            ? undefined
+            ? current.domain
             : normalizeDomain(input.domain.includes("://") ? input.domain : `https://${input.domain}`);
-        const query = input.query?.trim();
-        if (input.query !== undefined && !query)
+        const query = input.query === undefined ? current.query : input.query.trim();
+        if (!query)
             throw new Error("Search interest must not be empty.");
-        if (input.cadenceMinutes !== undefined &&
-            (!Number.isInteger(input.cadenceMinutes) || input.cadenceMinutes < 5)) {
+        if (input.cadenceMinutes !== undefined && (!Number.isInteger(input.cadenceMinutes) || input.cadenceMinutes < 5)) {
             throw new Error("Search cadence must be an integer of at least 5 minutes.");
         }
-        const resetBaseline = (domain !== undefined && domain !== current.domain) ||
-            (query !== undefined && query !== current.query);
+        const resetBaseline = domain !== current.domain || query !== current.query;
+        let adapter = current.adapter;
+        if (resetBaseline || !adapter) {
+            input.signal?.throwIfAborted();
+            adapter = (await this.searchClient.discover(domain, query, input.signal)).adapter;
+        }
         return this.database.updateSearchWatch(input.watchId, {
             domain,
             query,
             cadenceMinutes: input.cadenceMinutes,
             enabled: input.enabled,
             notifyOnInitialResults: input.notifyOnInitialResults,
+            adapter,
             updatedAt: this.now().toISOString(),
             resetBaseline,
         });
@@ -133,9 +124,11 @@ export class SearchWatchService {
         options.signal?.throwIfAborted();
         const watch = this.database.getSearchWatch(watchId);
         if (!watch)
-            throw new Error(`Search watch ${watchId} was not found.`);
-        const query = searchQuery(watch);
-        const raw = await this.searchClient.search(query, options.resultsPerSearch ?? 20, options.signal);
+            throw new Error(`No search watch exists with id ${watchId}.`);
+        if (!watch.adapter) {
+            throw new Error(`Search watch ${watchId} has no validated deterministic adapter and must be re-registered.`);
+        }
+        const raw = await this.searchClient.search(watch.adapter, watch.query, options.resultsPerSearch ?? 50, options.signal);
         options.signal?.throwIfAborted();
         const unique = new Map();
         for (const result of raw) {
@@ -145,19 +138,23 @@ export class SearchWatchService {
         }
         const checkedAt = this.now().toISOString();
         const nextCheckAt = new Date(Date.parse(checkedAt) + watch.cadenceMinutes * 60_000).toISOString();
-        const initialRun = !watch.lastCheckedAt;
-        const baselineEstablished = initialRun && !watch.notifyOnInitialResults;
+        const baselineEstablished = !watch.lastCheckedAt;
+        const suppressInitial = baselineEstablished && !watch.notifyOnInitialResults;
         const results = [...unique.values()];
         const newResults = options.dryRun
             ? results.map((result) => ({ ...result, firstSeenAt: checkedAt, lastSeenAt: checkedAt }))
-            : this.database.recordSearchWatchResults({ watchId, results, checkedAt, nextCheckAt });
+            : this.database.recordSearchWatchResults({
+                watchId: watch.id,
+                results,
+                checkedAt,
+                nextCheckAt,
+            });
         let notificationsRecommended = 0;
-        if (!options.dryRun && !baselineEstablished && options.notification) {
+        if (!options.dryRun && options.notification && !suppressInitial) {
             for (const result of newResults) {
                 const payload = {
                     kind: "search_result",
-                    searchWatchId: watch.id,
-                    searchQuery: watch.query,
+                    watchId: watch.id,
                     productName: result.title ?? watch.query,
                     resultTitle: result.title,
                     resultSnippet: result.snippet,
@@ -181,11 +178,15 @@ export class SearchWatchService {
                     notificationsRecommended += 1;
             }
         }
+        const searchUrl = new URL(watch.adapter.searchUrl);
+        for (const [key, value] of Object.entries(watch.adapter.fixedParameters))
+            searchUrl.searchParams.set(key, value);
+        searchUrl.searchParams.set(watch.adapter.queryParameter, watch.query);
         return {
             watchId: watch.id,
             domain: watch.domain,
             query: watch.query,
-            searchQuery: query,
+            searchUrl: searchUrl.toString(),
             checkedAt,
             matchedResults: results.length,
             newResults,

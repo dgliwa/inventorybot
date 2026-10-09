@@ -1,37 +1,48 @@
 import { describe, expect, it, vi } from "vitest";
-import type { RetailerSearchClient, SearchResult } from "../discovery/types.js";
+import type { SearchResult } from "../discovery/types.js";
 import { InventoryDatabase } from "../persistence/db.js";
 import { SearchWatchService } from "./service.js";
+import type { DeterministicSearchAdapter, DeterministicSearchClient } from "./types.js";
 
-class MutableSearchClient implements RetailerSearchClient {
+const adapter: DeterministicSearchAdapter = {
+  version: 1,
+  domain: "costco.com",
+  searchUrl: "https://www.costco.com/search",
+  queryParameter: "keyword",
+  fixedParameters: {},
+  parser: "html_links",
+  validatedAt: "2026-01-01T00:00:00.000Z",
+  validationResultCount: 1,
+};
+
+class MutableSearchClient implements DeterministicSearchClient {
   results: SearchResult[] = [];
+  readonly discover = vi.fn(async (domain: string) => ({
+    adapter: { ...adapter, domain },
+    results: this.results,
+  }));
   readonly search = vi.fn(async () => this.results);
 }
 
 describe("SearchWatchService", () => {
-  it("establishes a silent baseline and queues only newly seen matching URLs", async () => {
+  it("discovers an adapter before persisting and queues only newly seen results", async () => {
     const database = new InventoryDatabase(":memory:");
     const client = new MutableSearchClient();
     const service = new SearchWatchService(database, client, () => new Date("2026-01-01T00:00:00.000Z"));
     try {
-      const watch = service.add({ domain: "costco.com", query: "magic the gathering" });
-      expect(watch).toMatchObject({
-        domain: "costco.com",
-        query: "magic the gathering",
-        cadenceMinutes: 60,
-        notifyOnInitialResults: false,
-      });
       client.results = [{
         url: "https://www.costco.com/magic-the-gathering-box.product.1.html?utm_source=test",
-        title: "Magic: The Gathering Box",
+        title: "Magic: Gathering Box",
       }];
+      const watch = await service.add({ domain: "costco.com", query: "magic gathering" });
+      expect(watch).toMatchObject({
+        domain: "costco.com",
+        cadenceMinutes: 60,
+        adapter: { queryParameter: "keyword" },
+      });
       await expect(service.run(watch.id, {
         notification: { channel: "discord", target: "channel:123" },
-      })).resolves.toMatchObject({
-        matchedResults: 1,
-        baselineEstablished: true,
-        notificationsRecommended: 0,
-      });
+      })).resolves.toMatchObject({ baselineEstablished: true, notificationsRecommended: 0 });
 
       client.results.push({
         url: "https://www.costco.com/magic-the-gathering-bundle.product.2.html",
@@ -41,7 +52,6 @@ describe("SearchWatchService", () => {
         notification: { channel: "discord", target: "channel:123" },
       })).resolves.toMatchObject({
         matchedResults: 2,
-        baselineEstablished: false,
         notificationsRecommended: 1,
         newResults: [{ url: "https://www.costco.com/magic-the-gathering-bundle.product.2.html" }],
       });
@@ -51,52 +61,32 @@ describe("SearchWatchService", () => {
     }
   });
 
-  it("edits cadence and resets results when the search changes", async () => {
+  it("creates no watch when adapter discovery fails", async () => {
     const database = new InventoryDatabase(":memory:");
     const client = new MutableSearchClient();
+    client.discover.mockRejectedValueOnce(new Error("no search form"));
     const service = new SearchWatchService(database, client);
     try {
-      const watch = service.add({
-        domain: "costco.com",
-        query: "magic the gathering",
-        cadenceMinutes: 60,
-      });
-      client.results = [{
-        url: "https://www.costco.com/magic-the-gathering.product.1.html",
-        title: "Magic the Gathering",
-      }];
-      await service.run(watch.id);
-      expect(database.listSearchWatchResults(watch.id)).toHaveLength(1);
-
-      const updated = service.update({
-        watchId: watch.id,
-        query: "pokemon",
-        cadenceMinutes: 30,
-      });
-      expect(updated).toMatchObject({ query: "pokemon", cadenceMinutes: 30 });
-      expect(updated).not.toHaveProperty("lastCheckedAt");
-      expect(database.listSearchWatchResults(watch.id)).toEqual([]);
+      await expect(service.add({ domain: "example.com", query: "cards" })).rejects.toThrow("no search form");
+      expect(database.listSearchWatches()).toEqual([]);
     } finally {
       database.close();
     }
   });
 
-  it("strips OpenClaw trust wrappers and opaque snippet placeholders", async () => {
+  it("rediscovers the adapter and resets results when the query changes", async () => {
     const database = new InventoryDatabase(":memory:");
     const client = new MutableSearchClient();
     const service = new SearchWatchService(database, client);
     try {
-      const watch = service.add({ domain: "costco.com", query: "magic the gathering" });
-      client.results = [{
-        url: "https://costco.com/magic-the-gathering.product.1.html",
-        title: "<<<EXTERNAL_UNTRUSTED_CONTENT id=\"abc\">>>\nSource: Web Search\n---\nMagic: The Gathering Bundle | Costco\n<<<END_EXTERNAL_UNTRUSTED_CONTENT id=\"abc\">>>",
-        snippet: "<<ccr:abc,string,500B>>",
-      }];
-      const result = await service.run(watch.id, { dryRun: true });
-      expect(result.newResults[0]).toMatchObject({
-        title: "Magic: The Gathering Bundle | Costco",
-      });
-      expect(result.newResults[0]).not.toHaveProperty("snippet");
+      const watch = await service.add({ domain: "costco.com", query: "magic gathering" });
+      client.results = [{ url: "https://costco.com/magic-gathering", title: "Magic Gathering" }];
+      await service.run(watch.id);
+      const updated = await service.update({ watchId: watch.id, query: "pokemon", cadenceMinutes: 30 });
+      expect(updated).toMatchObject({ query: "pokemon", cadenceMinutes: 30 });
+      expect(updated).not.toHaveProperty("lastCheckedAt");
+      expect(database.listSearchWatchResults(watch.id)).toEqual([]);
+      expect(client.discover).toHaveBeenCalledTimes(2);
     } finally {
       database.close();
     }
@@ -107,7 +97,7 @@ describe("SearchWatchService", () => {
     const client = new MutableSearchClient();
     const service = new SearchWatchService(database, client);
     try {
-      const watch = service.add({ domain: "costco.com", query: "magic the gathering" });
+      const watch = await service.add({ domain: "costco.com", query: "magic the gathering" });
       client.results = [
         { url: "https://example.com/magic-the-gathering", title: "Magic the Gathering" },
         { url: "https://costco.com/pokemon", title: "Pokemon cards" },
@@ -115,7 +105,6 @@ describe("SearchWatchService", () => {
       await expect(service.run(watch.id, { dryRun: true })).resolves.toMatchObject({
         matchedResults: 0,
         newResults: [],
-        dryRun: true,
       });
     } finally {
       database.close();

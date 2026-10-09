@@ -153,15 +153,17 @@ Example watch input:
 
 ## Retailer search watches
 
-Search watches monitor a retailer for newly indexed results matching an interest rather than checking one known product URL:
+Search watches monitor a retailer's own search results rather than checking one known product URL:
 
-- `inventory_search_watch_add` — create a watch; cadence defaults to 60 minutes
-- `inventory_search_watch_update` — edit the retailer, search phrase, cadence, or enabled state
-- `inventory_search_watch_status` — show scheduling and recently seen results
-- `inventory_search_watch_run` — run selected or all enabled watches now; supports a no-write `dryRun`
+- `inventory_search_watch_add` — inspect the site, discover and validate a deterministic GET search adapter, then create a watch; cadence defaults to 60 minutes
+- `inventory_search_watch_update` — edit the retailer, search phrase, cadence, or enabled state; retailer/query changes require adapter rediscovery
+- `inventory_search_watch_status` — show the persisted adapter, scheduling, and recently seen results
+- `inventory_search_watch_run` — execute selected or all enabled site adapters now; supports a no-write `dryRun`
 - `inventory_search_watch_remove` — disable by default or permanently delete with confirmation
 
-Searches use `site:<domain> "<interest>"`, reject other domains, require the interest terms in result metadata, and permanently deduplicate normalized result URLs. The first run establishes a silent baseline by default; set `notifyOnInitialResults: true` to alert on existing matches. Changing the retailer or search phrase resets the baseline, while changing only cadence preserves result history.
+Registration fetches the retailer homepage, finds a public GET search form, executes the discovered endpoint twice, and requires at least one stable matching product URL before persisting anything. Scheduled runs call that endpoint directly and never use a general web-search provider. JavaScript-only, authenticated, POST-only, blocked, off-domain, oversized, or unparseable searches fail safely with no watch creation.
+
+Result URLs are normalized and permanently deduplicated. The first scheduled run establishes a silent baseline by default; set `notifyOnInitialResults: true` to alert on existing matches. Changing the retailer or search phrase validates a replacement adapter before resetting the baseline, while changing only cadence preserves result history.
 
 ```json
 {

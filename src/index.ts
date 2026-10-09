@@ -20,6 +20,7 @@ import { inspectRetailerStatic } from "./inspection/static.js";
 import { parseInventoryBotConfig } from "./monitoring/config.js";
 import { InventoryMonitor } from "./monitoring/service.js";
 import { OpenClawDiscordChannel } from "./notifications/discord.js";
+import { DirectRetailerSearchClient, SearchAdapterDiscoveryError } from "./search-watches/deterministic.js";
 import { SearchWatchService } from "./search-watches/service.js";
 import type { NotificationChannel } from "./notifications/types.js";
 import { InventoryDatabase } from "./persistence/db.js";
@@ -81,6 +82,7 @@ function createMonitor(api: OpenClawPluginApi): InventoryMonitor {
     registryFactory: (database) => activeAdapterRegistry(api, database),
     config,
     searchClient,
+    deterministicSearchClient: new DirectRetailerSearchClient(),
     notificationChannels: notificationChannels(api, {
       enabled: config.notifications.discord?.enabled === true,
       maxRetries: config.notifications.maxAttempts,
@@ -644,7 +646,7 @@ const inventoryToolPlugin = defineToolPlugin({
     tool({
       name: "inventory_search_watch_add",
       description:
-        "Create a retailer search watch with an independently editable search phrase and cadence. The first run establishes a silent baseline unless notifyOnInitialResults is true.",
+        "Inspect a retailer's public site, discover and live-validate a deterministic GET search adapter, then create a search watch. Creates nothing when discovery or validation fails.",
       parameters: Type.Object(
         {
           domain: Type.String({ minLength: 1 }),
@@ -661,10 +663,12 @@ const inventoryToolPlugin = defineToolPlugin({
         signal?.throwIfAborted();
         const database = openInventoryDatabase(api, config.persistence?.databasePath);
         try {
-          const searchClient = new OpenClawSearchClient(({ args, signal: searchSignal }) =>
-            api.runtime.webSearch.search({ config: api.config, args, signal: searchSignal }),
-          );
-          return new SearchWatchService(database, searchClient).add(input);
+          return await new SearchWatchService(database, new DirectRetailerSearchClient()).add({ ...input, signal });
+        } catch (error) {
+          if (error instanceof SearchAdapterDiscoveryError) {
+            return { error: { code: error.code, message: error.message, nextAction: error.nextAction } };
+          }
+          throw error;
         } finally {
           database.close();
         }
@@ -689,12 +693,14 @@ const inventoryToolPlugin = defineToolPlugin({
         signal?.throwIfAborted();
         const database = openInventoryDatabase(api, config.persistence?.databasePath);
         try {
-          const searchClient = new OpenClawSearchClient(({ args, signal: searchSignal }) =>
-            api.runtime.webSearch.search({ config: api.config, args, signal: searchSignal }),
-          );
-          return new SearchWatchService(database, searchClient).update(input) ?? {
+          return await new SearchWatchService(database, new DirectRetailerSearchClient()).update({ ...input, signal }) ?? {
             error: { code: "SEARCH_WATCH_NOT_FOUND", message: `No search watch exists with id ${input.watchId}.` },
           };
+        } catch (error) {
+          if (error instanceof SearchAdapterDiscoveryError) {
+            return { error: { code: error.code, message: error.message, nextAction: error.nextAction } };
+          }
+          throw error;
         } finally {
           database.close();
         }
@@ -711,10 +717,7 @@ const inventoryToolPlugin = defineToolPlugin({
         signal?.throwIfAborted();
         const database = openInventoryDatabase(api, config.persistence?.databasePath);
         try {
-          const searchClient = new OpenClawSearchClient(({ args, signal: searchSignal }) =>
-            api.runtime.webSearch.search({ config: api.config, args, signal: searchSignal }),
-          );
-          const watches = new SearchWatchService(database, searchClient).status(watchId);
+          const watches = new SearchWatchService(database, new DirectRetailerSearchClient()).status(watchId);
           return watchId && watches.length === 0
             ? { error: { code: "SEARCH_WATCH_NOT_FOUND", message: `No search watch exists with id ${watchId}.` } }
             : { watches };
@@ -749,10 +752,7 @@ const inventoryToolPlugin = defineToolPlugin({
         }
         const database = openInventoryDatabase(api, config.persistence?.databasePath);
         try {
-          const searchClient = new OpenClawSearchClient(({ args, signal: searchSignal }) =>
-            api.runtime.webSearch.search({ config: api.config, args, signal: searchSignal }),
-          );
-          return new SearchWatchService(database, searchClient).remove(watchId, permanent);
+          return new SearchWatchService(database, new DirectRetailerSearchClient()).remove(watchId, permanent);
         } finally {
           database.close();
         }
@@ -761,7 +761,7 @@ const inventoryToolPlugin = defineToolPlugin({
     tool({
       name: "inventory_search_watch_run",
       description:
-        "Run one or more retailer search watches now. New result URLs are deduplicated permanently; dryRun performs no writes or notifications.",
+        "Run one or more deterministic retailer-site search adapters now. No general web search is used; dryRun performs no writes or notifications.",
       parameters: Type.Object(
         {
           watchIds: Type.Optional(

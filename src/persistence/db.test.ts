@@ -16,7 +16,7 @@ const fixture = `<script type="application/ld+json">{
 }</script>`;
 
 describe("InventoryDatabase persistence", () => {
-  it("migrates a legacy notification table to schema version 5", () => {
+  it("migrates a legacy notification table to schema version 6", () => {
     const directory = mkdtempSync(join(tmpdir(), "inventorybot-migration-"));
     const path = join(directory, "inventorybot.sqlite");
     const legacy = new DatabaseSync(path);
@@ -37,7 +37,7 @@ describe("InventoryDatabase persistence", () => {
 
     const migrated = new InventoryDatabase(path);
     try {
-      expect(migrated.schemaVersion()).toBe(5);
+      expect(migrated.schemaVersion()).toBe(6);
       expect(migrated.notificationStatus()).toEqual({
         pending: 0,
         processing: 0,
@@ -62,7 +62,7 @@ describe("InventoryDatabase persistence", () => {
         retailers: [{ url: "https://shop.example.test/products/42" }],
       });
       expect(database.healthStatus()).toMatchObject({
-        schemaVersion: 5,
+        schemaVersion: 6,
         quickCheck: ["ok"],
         healthy: true,
         tableCounts: {

@@ -4,7 +4,7 @@ import type { RetailerCandidate } from "../discovery/types.js";
 import type { AdapterCandidate, AdapterValidationReport } from "../generation/types.js";
 import type { RetailerInspection } from "../inspection/types.js";
 import type { NotificationPayload, PendingNotification } from "../notifications/types.js";
-import type { RetailerSearchWatch, RetailerSearchWatchResult } from "../search-watches/types.js";
+import type { DeterministicSearchAdapter, RetailerSearchWatch, RetailerSearchWatchResult } from "../search-watches/types.js";
 import type { InventoryWatch } from "../watches/types.js";
 export type CreateWatchRecord = {
     id: string;
@@ -67,6 +67,7 @@ export declare class InventoryDatabase {
         cadenceMinutes?: number;
         enabled?: boolean;
         notifyOnInitialResults?: boolean;
+        adapter?: DeterministicSearchAdapter;
         updatedAt: string;
         resetBaseline?: boolean;
     }): RetailerSearchWatch | undefined;

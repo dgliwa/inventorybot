@@ -10,7 +10,7 @@ import { NotificationDispatcher } from "../notifications/dispatcher.js";
 import type { NotificationChannel } from "../notifications/types.js";
 import type { InventoryDatabase } from "../persistence/db.js";
 import { SearchWatchService } from "../search-watches/service.js";
-import type { SearchWatchRunResult } from "../search-watches/types.js";
+import type { DeterministicSearchClient, SearchWatchRunResult } from "../search-watches/types.js";
 import { WatchService, type WatchLogRecord } from "../watches/service.js";
 import { DomainConcurrencyLimiter } from "./concurrency.js";
 import type { InventoryBotConfig } from "./config.js";
@@ -52,6 +52,7 @@ type MonitorDependencies = {
   registryFactory?: (database: InventoryDatabase) => AdapterRegistry;
   config: InventoryBotConfig;
   searchClient?: RetailerSearchClient;
+  deterministicSearchClient: DeterministicSearchClient;
   notificationChannels?: ReadonlyMap<string, NotificationChannel>;
   inspect?: typeof inspectRetailerStatic;
   validate?: typeof validateRetailerAdapter;
@@ -96,6 +97,7 @@ export class InventoryMonitor {
   readonly #registryFactory: (database: InventoryDatabase) => AdapterRegistry;
   readonly #config: InventoryBotConfig;
   readonly #searchClient?: RetailerSearchClient;
+  readonly #deterministicSearchClient: DeterministicSearchClient;
   readonly #channels: ReadonlyMap<string, NotificationChannel>;
   readonly #inspect: typeof inspectRetailerStatic;
   readonly #validate: typeof validateRetailerAdapter;
@@ -117,6 +119,7 @@ export class InventoryMonitor {
     this.#registryFactory = dependencies.registryFactory ?? (() => dependencies.registry!);
     this.#config = dependencies.config;
     this.#searchClient = dependencies.searchClient;
+    this.#deterministicSearchClient = dependencies.deterministicSearchClient;
     this.#channels = dependencies.notificationChannels ?? new Map();
     this.#inspect = dependencies.inspect ?? inspectRetailerStatic;
     this.#validate = dependencies.validate ?? validateRetailerAdapter;
@@ -284,7 +287,7 @@ export class InventoryMonitor {
       ...(options.dryRun ? { dryRun: true as const } : {}),
     };
     try {
-      if (!this.#searchClient) throw new Error("Search watches require a configured web search provider.");
+
       const selectedIds = options.watchIds ? new Set(options.watchIds) : undefined;
       const nowMs = this.#now().getTime();
       const watches = database.listSearchWatches().filter((watch) =>
@@ -302,7 +305,7 @@ export class InventoryMonitor {
             threadId: discord.threadId,
           }
         : undefined;
-      const service = new SearchWatchService(database, this.#searchClient, this.#now);
+      const service = new SearchWatchService(database, this.#deterministicSearchClient, this.#now);
       for (const watch of watches) {
         try {
           const result = await service.run(watch.id, {
