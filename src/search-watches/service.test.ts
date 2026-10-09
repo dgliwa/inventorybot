@@ -81,6 +81,27 @@ describe("SearchWatchService", () => {
     }
   });
 
+  it("strips OpenClaw trust wrappers and opaque snippet placeholders", async () => {
+    const database = new InventoryDatabase(":memory:");
+    const client = new MutableSearchClient();
+    const service = new SearchWatchService(database, client);
+    try {
+      const watch = service.add({ domain: "costco.com", query: "magic the gathering" });
+      client.results = [{
+        url: "https://costco.com/magic-the-gathering.product.1.html",
+        title: "<<<EXTERNAL_UNTRUSTED_CONTENT id=\"abc\">>>\nSource: Web Search\n---\nMagic: The Gathering Bundle | Costco\n<<<END_EXTERNAL_UNTRUSTED_CONTENT id=\"abc\">>>",
+        snippet: "<<ccr:abc,string,500B>>",
+      }];
+      const result = await service.run(watch.id, { dryRun: true });
+      expect(result.newResults[0]).toMatchObject({
+        title: "Magic: The Gathering Bundle | Costco",
+      });
+      expect(result.newResults[0]).not.toHaveProperty("snippet");
+    } finally {
+      database.close();
+    }
+  });
+
   it("filters other domains and unrelated results", async () => {
     const database = new InventoryDatabase(":memory:");
     const client = new MutableSearchClient();

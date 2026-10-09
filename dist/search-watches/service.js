@@ -13,6 +13,19 @@ function matchesInterest(result, query) {
     const tokens = interest.split(" ").filter((token) => token.length > 1);
     return tokens.length > 0 && tokens.every((token) => haystack.includes(token));
 }
+function cleanResultText(value) {
+    if (!value || /^<<ccr:[^>]+>>$/i.test(value.trim()))
+        return undefined;
+    const cleaned = value
+        .split("\n")
+        .filter((line) => !line.startsWith("<<<EXTERNAL_UNTRUSTED_CONTENT") &&
+        !line.startsWith("<<<END_EXTERNAL_UNTRUSTED_CONTENT") &&
+        !line.startsWith("Source: Web Search") &&
+        line.trim() !== "---")
+        .join("\n")
+        .trim();
+    return cleaned || undefined;
+}
 function canonicalResult(result, domain) {
     try {
         const url = new URL(result.url);
@@ -26,10 +39,12 @@ function canonicalResult(result, domain) {
         }
         if (url.pathname.length > 1)
             url.pathname = url.pathname.replace(/\/+$/, "");
+        const title = cleanResultText(result.title);
+        const snippet = cleanResultText(result.snippet);
         return {
             url: url.toString(),
-            ...(result.title ? { title: result.title.trim() } : {}),
-            ...(result.snippet ? { snippet: result.snippet.trim() } : {}),
+            ...(title ? { title } : {}),
+            ...(snippet ? { snippet } : {}),
         };
     }
     catch {
