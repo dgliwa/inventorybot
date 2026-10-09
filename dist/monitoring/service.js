@@ -4,6 +4,7 @@ import { generateRetailerAdapter } from "../generation/generate-adapter.js";
 import { validateRetailerAdapter } from "../generation/validate-adapter.js";
 import { inspectRetailerStatic } from "../inspection/static.js";
 import { NotificationDispatcher } from "../notifications/dispatcher.js";
+import { SearchWatchService } from "../search-watches/service.js";
 import { WatchService } from "../watches/service.js";
 import { DomainConcurrencyLimiter } from "./concurrency.js";
 function safeError(error) {
@@ -40,8 +41,10 @@ export class InventoryMonitor {
     #now;
     #fastTimer;
     #slowTimer;
+    #searchTimer;
     #fastRun;
     #slowRun;
+    #searchRun;
     #controller;
     constructor(dependencies) {
         this.#databaseFactory = dependencies.databaseFactory;
@@ -63,6 +66,7 @@ export class InventoryMonitor {
         this.#controller = new AbortController();
         this.scheduleFast(this.#config.monitoring.fastIntervalSeconds * 1_000);
         this.scheduleSlow(this.#config.monitoring.slowIntervalHours * 60 * 60_000);
+        this.scheduleSearch(60_000);
     }
     async stop() {
         this.#controller?.abort();
@@ -71,14 +75,21 @@ export class InventoryMonitor {
             clearTimeout(this.#fastTimer);
         if (this.#slowTimer)
             clearTimeout(this.#slowTimer);
+        if (this.#searchTimer)
+            clearTimeout(this.#searchTimer);
         this.#fastTimer = undefined;
         this.#slowTimer = undefined;
-        await Promise.allSettled([this.#fastRun, this.#slowRun].filter(Boolean));
+        this.#searchTimer = undefined;
+        await Promise.allSettled([this.#fastRun, this.#slowRun, this.#searchRun].filter(Boolean));
     }
     status() {
         return {
             enabled: this.#config.monitoring.enabled,
-            running: { fast: Boolean(this.#fastRun), slow: Boolean(this.#slowRun) },
+            running: {
+                fast: Boolean(this.#fastRun),
+                slow: Boolean(this.#slowRun),
+                search: Boolean(this.#searchRun),
+            },
             intervals: {
                 fastSeconds: this.#config.monitoring.fastIntervalSeconds,
                 slowHours: this.#config.monitoring.slowIntervalHours,
@@ -104,6 +115,15 @@ export class InventoryMonitor {
             this.#slowRun = undefined;
         });
         return this.#slowRun;
+    }
+    runSearch(options = {}) {
+        if (this.#searchRun)
+            return this.#searchRun;
+        const signal = this.combineWithLifecycleSignal(options.signal);
+        this.#searchRun = this.executeSearch({ ...options, signal }).finally(() => {
+            this.#searchRun = undefined;
+        });
+        return this.#searchRun;
     }
     combineWithLifecycleSignal(signal) {
         const lifecycleSignal = this.#controller?.signal;
@@ -140,6 +160,96 @@ export class InventoryMonitor {
                 .finally(() => this.scheduleSlow(this.#config.monitoring.slowIntervalHours * 60 * 60_000));
         }, delayMs + jitterMs);
         this.#slowTimer.unref?.();
+    }
+    scheduleSearch(delayMs) {
+        if (!this.#controller)
+            return;
+        this.#searchTimer = setTimeout(() => {
+            const signal = this.#controller?.signal;
+            if (!signal || signal.aborted)
+                return;
+            void this.runSearch({ signal, dueOnly: true })
+                .catch((error) => this.#log({ event: "inventory_search_loop_failed", error: safeError(error) }))
+                .finally(() => this.scheduleSearch(60_000));
+        }, delayMs);
+        this.#searchTimer.unref?.();
+    }
+    async executeSearch(options) {
+        options.signal?.throwIfAborted();
+        const database = this.#databaseFactory();
+        const startedAt = this.#now().toISOString();
+        const runId = options.dryRun ? undefined : database.startMonitorRun("search", startedAt);
+        const summary = {
+            watchesConsidered: 0,
+            watchesRun: 0,
+            failures: 0,
+            newResults: 0,
+            notificationsRecommended: 0,
+            results: [],
+            delivery: { claimed: 0, sent: 0, failed: 0, terminal: 0 },
+            ...(options.dryRun ? { dryRun: true } : {}),
+        };
+        try {
+            if (!this.#searchClient)
+                throw new Error("Search watches require a configured web search provider.");
+            const selectedIds = options.watchIds ? new Set(options.watchIds) : undefined;
+            const nowMs = this.#now().getTime();
+            const watches = database.listSearchWatches().filter((watch) => watch.enabled &&
+                (!selectedIds || selectedIds.has(watch.id)) &&
+                (!options.dueOnly || !watch.nextCheckAt || Date.parse(watch.nextCheckAt) <= nowMs));
+            summary.watchesConsidered = database.listSearchWatches().filter(({ enabled }) => enabled).length;
+            const discord = this.#config.notifications.discord;
+            const notification = discord?.enabled && options.deliverNotifications !== false
+                ? {
+                    channel: "discord",
+                    target: discord.target,
+                    accountId: discord.accountId,
+                    threadId: discord.threadId,
+                }
+                : undefined;
+            const service = new SearchWatchService(database, this.#searchClient, this.#now);
+            for (const watch of watches) {
+                try {
+                    const result = await service.run(watch.id, {
+                        signal: options.signal,
+                        dryRun: options.dryRun,
+                        notification,
+                    });
+                    summary.watchesRun += 1;
+                    summary.newResults += result.newResults.length;
+                    summary.notificationsRecommended += result.notificationsRecommended;
+                    summary.results.push(result);
+                }
+                catch (error) {
+                    options.signal?.throwIfAborted();
+                    summary.failures += 1;
+                    this.#log({ event: "inventory_search_watch_failed", watch_id: watch.id, error: safeError(error) });
+                }
+            }
+            if (!options.dryRun && options.deliverNotifications !== false) {
+                summary.delivery = await new NotificationDispatcher(database, this.#channels, {
+                    maxAttempts: this.#config.notifications.maxAttempts,
+                    batchSize: this.#config.notifications.batchSize,
+                    baseRetryMs: this.#config.notifications.baseRetrySeconds * 1_000,
+                }, this.#now).dispatch({ signal: options.signal });
+            }
+            if (runId !== undefined) {
+                database.completeMonitorRun(runId, { completedAt: this.#now().toISOString(), summary });
+            }
+            return summary;
+        }
+        catch (error) {
+            if (runId !== undefined) {
+                database.completeMonitorRun(runId, {
+                    completedAt: this.#now().toISOString(),
+                    error: safeError(error),
+                });
+            }
+            throw error;
+        }
+        finally {
+            database.close();
+        }
     }
     async executeFast(signal, deliverNotifications, watchIds) {
         signal?.throwIfAborted();

@@ -1,5 +1,5 @@
 export type NotificationPayload = {
-  kind: "inventory_transition" | "test";
+  kind: "inventory_transition" | "search_result" | "test";
   watchId?: string;
   targetId?: string;
   productName: string;
@@ -12,6 +12,10 @@ export type NotificationPayload = {
   currency?: string;
   confidence?: number;
   checkedAt: string;
+  searchWatchId?: string;
+  searchQuery?: string;
+  resultTitle?: string;
+  resultSnippet?: string;
 };
 
 export type PendingNotification = {

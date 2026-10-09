@@ -151,6 +151,29 @@ Example watch input:
 
 `inventory_watch_remove` disables a watch by default and preserves its history. Permanent deletion requires both `permanent: true` and `confirmDeletion: true`. Watch add/status results report whether each target currently has an active adapter; set `requireActiveAdapter: true` when adding a watch to reject uncovered targets instead of persisting them.
 
+## Retailer search watches
+
+Search watches monitor a retailer for newly indexed results matching an interest rather than checking one known product URL:
+
+- `inventory_search_watch_add` — create a watch; cadence defaults to 60 minutes
+- `inventory_search_watch_update` — edit the retailer, search phrase, cadence, or enabled state
+- `inventory_search_watch_status` — show scheduling and recently seen results
+- `inventory_search_watch_run` — run selected or all enabled watches now; supports a no-write `dryRun`
+- `inventory_search_watch_remove` — disable by default or permanently delete with confirmation
+
+Searches use `site:<domain> "<interest>"`, reject other domains, require the interest terms in result metadata, and permanently deduplicate normalized result URLs. The first run establishes a silent baseline by default; set `notifyOnInitialResults: true` to alert on existing matches. Changing the retailer or search phrase resets the baseline, while changing only cadence preserves result history.
+
+```json
+{
+  "domain": "costco.com",
+  "query": "magic the gathering",
+  "cadenceMinutes": 60,
+  "notifyOnInitialResults": false
+}
+```
+
+When monitoring is enabled, the scheduler checks every minute for search watches whose individual cadence is due.
+
 ## Fast loop
 
 The Gateway-owned InventoryBot service starts only during full plugin activation. When monitoring is enabled, the fast loop:

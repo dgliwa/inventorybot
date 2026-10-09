@@ -14,6 +14,17 @@ export function formatInventoryNotification(payload: NotificationPayload): strin
   if (payload.kind === "test") {
     return `🔔 InventoryBot test notification\n\nConfigured delivery is working.\n${payload.checkedAt}`;
   }
+  if (payload.kind === "search_result") {
+    const lines = [
+      `🔎 New ${payload.retailerDomain ?? "retailer"} result for “${payload.searchQuery ?? payload.productName}”`,
+      "",
+      payload.resultTitle ?? payload.productName,
+    ];
+    if (payload.resultSnippet) lines.push("", payload.resultSnippet);
+    lines.push("", `Found: ${payload.checkedAt}`);
+    if (payload.url) lines.push("", payload.url);
+    return lines.join("\n");
+  }
   const available = payload.currentStatus === "in_stock";
   const lines = [
     available ? `🟢 ${payload.productName} is in stock` : `🔴 ${payload.productName} is unavailable`,

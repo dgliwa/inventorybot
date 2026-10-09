@@ -20,6 +20,7 @@ import { inspectRetailerStatic } from "./inspection/static.js";
 import { parseInventoryBotConfig } from "./monitoring/config.js";
 import { InventoryMonitor } from "./monitoring/service.js";
 import { OpenClawDiscordChannel } from "./notifications/discord.js";
+import { SearchWatchService } from "./search-watches/service.js";
 import type { NotificationChannel } from "./notifications/types.js";
 import { InventoryDatabase } from "./persistence/db.js";
 import { resolveInventoryDatabasePath } from "./persistence/path.js";
@@ -633,6 +634,140 @@ const inventoryToolPlugin = defineToolPlugin({
       },
     }),
     tool({
+      name: "inventory_search_watch_add",
+      description:
+        "Create a retailer search watch with an independently editable search phrase and cadence. The first run establishes a silent baseline unless notifyOnInitialResults is true.",
+      parameters: Type.Object(
+        {
+          domain: Type.String({ minLength: 1 }),
+          query: Type.String({ minLength: 1, maxLength: 500 }),
+          cadenceMinutes: Type.Optional(
+            Type.Integer({ minimum: 5, maximum: 43_200, default: 60 }),
+          ),
+          enabled: Type.Optional(Type.Boolean({ default: true })),
+          notifyOnInitialResults: Type.Optional(Type.Boolean({ default: false })),
+        },
+        { additionalProperties: false },
+      ),
+      execute: async (input, config, { api, signal }) => {
+        signal?.throwIfAborted();
+        const database = openInventoryDatabase(api, config.persistence?.databasePath);
+        try {
+          const searchClient = new OpenClawSearchClient(({ args, signal: searchSignal }) =>
+            api.runtime.webSearch.search({ config: api.config, args, signal: searchSignal }),
+          );
+          return new SearchWatchService(database, searchClient).add(input);
+        } finally {
+          database.close();
+        }
+      },
+    }),
+    tool({
+      name: "inventory_search_watch_update",
+      description:
+        "Edit a search watch's retailer, search phrase, cadence, enabled state, or initial-alert policy. Changing the retailer or phrase resets its result baseline.",
+      parameters: Type.Object(
+        {
+          watchId: Type.String({ minLength: 1 }),
+          domain: Type.Optional(Type.String({ minLength: 1 })),
+          query: Type.Optional(Type.String({ minLength: 1, maxLength: 500 })),
+          cadenceMinutes: Type.Optional(Type.Integer({ minimum: 5, maximum: 43_200 })),
+          enabled: Type.Optional(Type.Boolean()),
+          notifyOnInitialResults: Type.Optional(Type.Boolean()),
+        },
+        { additionalProperties: false },
+      ),
+      execute: async (input, config, { api, signal }) => {
+        signal?.throwIfAborted();
+        const database = openInventoryDatabase(api, config.persistence?.databasePath);
+        try {
+          const searchClient = new OpenClawSearchClient(({ args, signal: searchSignal }) =>
+            api.runtime.webSearch.search({ config: api.config, args, signal: searchSignal }),
+          );
+          return new SearchWatchService(database, searchClient).update(input) ?? {
+            error: { code: "SEARCH_WATCH_NOT_FOUND", message: `No search watch exists with id ${input.watchId}.` },
+          };
+        } finally {
+          database.close();
+        }
+      },
+    }),
+    tool({
+      name: "inventory_search_watch_status",
+      description: "Read one or all retailer search watches, including editable cadence, next run, and recently seen results.",
+      parameters: Type.Object(
+        { watchId: Type.Optional(Type.String({ minLength: 1 })) },
+        { additionalProperties: false },
+      ),
+      execute: async ({ watchId }, config, { api, signal }) => {
+        signal?.throwIfAborted();
+        const database = openInventoryDatabase(api, config.persistence?.databasePath);
+        try {
+          const searchClient = new OpenClawSearchClient(({ args, signal: searchSignal }) =>
+            api.runtime.webSearch.search({ config: api.config, args, signal: searchSignal }),
+          );
+          const watches = new SearchWatchService(database, searchClient).status(watchId);
+          return watchId && watches.length === 0
+            ? { error: { code: "SEARCH_WATCH_NOT_FOUND", message: `No search watch exists with id ${watchId}.` } }
+            : { watches };
+        } finally {
+          database.close();
+        }
+      },
+    }),
+    tool({
+      name: "inventory_search_watch_remove",
+      description: "Disable a retailer search watch by default. Permanent deletion of the watch and its result history requires explicit confirmation.",
+      parameters: Type.Object(
+        {
+          watchId: Type.String({ minLength: 1 }),
+          permanent: Type.Optional(Type.Boolean({ default: false })),
+          confirmDeletion: Type.Optional(Type.Literal(true)),
+        },
+        { additionalProperties: false },
+      ),
+      execute: async ({ watchId, permanent, confirmDeletion }, config, { api, signal }) => {
+        signal?.throwIfAborted();
+        if (permanent && confirmDeletion !== true) {
+          return {
+            watchId,
+            disabled: false,
+            removed: false,
+            error: {
+              code: "SEARCH_WATCH_DELETION_CONFIRMATION_REQUIRED",
+              message: "Permanent deletion requires confirmDeletion: true.",
+            },
+          };
+        }
+        const database = openInventoryDatabase(api, config.persistence?.databasePath);
+        try {
+          const searchClient = new OpenClawSearchClient(({ args, signal: searchSignal }) =>
+            api.runtime.webSearch.search({ config: api.config, args, signal: searchSignal }),
+          );
+          return new SearchWatchService(database, searchClient).remove(watchId, permanent);
+        } finally {
+          database.close();
+        }
+      },
+    }),
+    tool({
+      name: "inventory_search_watch_run",
+      description:
+        "Run one or more retailer search watches now. New result URLs are deduplicated permanently; dryRun performs no writes or notifications.",
+      parameters: Type.Object(
+        {
+          watchIds: Type.Optional(
+            Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 100 }),
+          ),
+          dryRun: Type.Optional(Type.Boolean({ default: false })),
+          deliverNotifications: Type.Optional(Type.Boolean({ default: true })),
+        },
+        { additionalProperties: false },
+      ),
+      execute: async ({ watchIds, dryRun, deliverNotifications }, _config, { api, signal }) =>
+        createMonitor(api).runSearch({ signal, watchIds, dryRun, deliverNotifications }),
+    }),
+    tool({
       name: "inventory_monitor_status",
       description: "Report scheduler configuration, database health, active-adapter coverage, recent fast and slow runs, and notification queue status.",
       parameters: Type.Object({}, { additionalProperties: false }),
@@ -644,6 +779,8 @@ const inventoryToolPlugin = defineToolPlugin({
           const registry = activeAdapterRegistry(api, database);
           const targets = watches.flatMap(({ retailers }) => retailers);
           const coveredTargets = targets.filter(({ url }) => registry.get(url)).length;
+          const searchWatches = database.listSearchWatches();
+          const now = Date.now();
           return {
             schemaVersion: database.schemaVersion(),
             database: database.healthStatus(),
@@ -658,6 +795,13 @@ const inventoryToolPlugin = defineToolPlugin({
               targets: targets.length,
               coveredTargets,
               uncoveredTargets: targets.length - coveredTargets,
+            },
+            searchWatches: {
+              total: searchWatches.length,
+              enabled: searchWatches.filter(({ enabled }) => enabled).length,
+              due: searchWatches.filter(({ enabled, nextCheckAt }) =>
+                enabled && (!nextCheckAt || Date.parse(nextCheckAt) <= now),
+              ).length,
             },
             recentRuns: database.monitorStatus(),
             notifications: database.notificationStatus(),

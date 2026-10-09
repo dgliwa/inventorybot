@@ -9,6 +9,8 @@ import type { RetailerInspection } from "../inspection/types.js";
 import { NotificationDispatcher } from "../notifications/dispatcher.js";
 import type { NotificationChannel } from "../notifications/types.js";
 import type { InventoryDatabase } from "../persistence/db.js";
+import { SearchWatchService } from "../search-watches/service.js";
+import type { SearchWatchRunResult } from "../search-watches/types.js";
 import { WatchService, type WatchLogRecord } from "../watches/service.js";
 import { DomainConcurrencyLimiter } from "./concurrency.js";
 import type { InventoryBotConfig } from "./config.js";
@@ -19,6 +21,17 @@ export type FastMonitorSummary = {
   watchFailures: number;
   notificationsRecommended: number;
   delivery: { claimed: number; sent: number; failed: number; terminal: number };
+};
+
+export type SearchMonitorSummary = {
+  watchesConsidered: number;
+  watchesRun: number;
+  failures: number;
+  newResults: number;
+  notificationsRecommended: number;
+  results: SearchWatchRunResult[];
+  delivery: { claimed: number; sent: number; failed: number; terminal: number };
+  dryRun?: true;
 };
 
 export type SlowMonitorSummary = {
@@ -90,8 +103,10 @@ export class InventoryMonitor {
   readonly #now: () => Date;
   #fastTimer?: ReturnType<typeof setTimeout>;
   #slowTimer?: ReturnType<typeof setTimeout>;
+  #searchTimer?: ReturnType<typeof setTimeout>;
   #fastRun?: Promise<FastMonitorSummary>;
   #slowRun?: Promise<SlowMonitorSummary>;
+  #searchRun?: Promise<SearchMonitorSummary>;
   #controller?: AbortController;
 
   constructor(dependencies: MonitorDependencies) {
@@ -114,6 +129,7 @@ export class InventoryMonitor {
     this.#controller = new AbortController();
     this.scheduleFast(this.#config.monitoring.fastIntervalSeconds * 1_000);
     this.scheduleSlow(this.#config.monitoring.slowIntervalHours * 60 * 60_000);
+    this.scheduleSearch(60_000);
   }
 
   async stop(): Promise<void> {
@@ -121,19 +137,25 @@ export class InventoryMonitor {
     this.#controller = undefined;
     if (this.#fastTimer) clearTimeout(this.#fastTimer);
     if (this.#slowTimer) clearTimeout(this.#slowTimer);
+    if (this.#searchTimer) clearTimeout(this.#searchTimer);
     this.#fastTimer = undefined;
     this.#slowTimer = undefined;
-    await Promise.allSettled([this.#fastRun, this.#slowRun].filter(Boolean));
+    this.#searchTimer = undefined;
+    await Promise.allSettled([this.#fastRun, this.#slowRun, this.#searchRun].filter(Boolean));
   }
 
   status(): {
     enabled: boolean;
-    running: { fast: boolean; slow: boolean };
+    running: { fast: boolean; slow: boolean; search: boolean };
     intervals: { fastSeconds: number; slowHours: number };
   } {
     return {
       enabled: this.#config.monitoring.enabled,
-      running: { fast: Boolean(this.#fastRun), slow: Boolean(this.#slowRun) },
+      running: {
+        fast: Boolean(this.#fastRun),
+        slow: Boolean(this.#slowRun),
+        search: Boolean(this.#searchRun),
+      },
       intervals: {
         fastSeconds: this.#config.monitoring.fastIntervalSeconds,
         slowHours: this.#config.monitoring.slowIntervalHours,
@@ -173,6 +195,23 @@ export class InventoryMonitor {
     return this.#slowRun;
   }
 
+  runSearch(
+    options: {
+      signal?: AbortSignal;
+      watchIds?: string[];
+      dryRun?: boolean;
+      deliverNotifications?: boolean;
+      dueOnly?: boolean;
+    } = {},
+  ): Promise<SearchMonitorSummary> {
+    if (this.#searchRun) return this.#searchRun;
+    const signal = this.combineWithLifecycleSignal(options.signal);
+    this.#searchRun = this.executeSearch({ ...options, signal }).finally(() => {
+      this.#searchRun = undefined;
+    });
+    return this.#searchRun;
+  }
+
   private combineWithLifecycleSignal(signal?: AbortSignal): AbortSignal | undefined {
     const lifecycleSignal = this.#controller?.signal;
     if (!signal) return lifecycleSignal;
@@ -204,6 +243,105 @@ export class InventoryMonitor {
         .finally(() => this.scheduleSlow(this.#config.monitoring.slowIntervalHours * 60 * 60_000));
     }, delayMs + jitterMs);
     this.#slowTimer.unref?.();
+  }
+
+  private scheduleSearch(delayMs: number): void {
+    if (!this.#controller) return;
+    this.#searchTimer = setTimeout(() => {
+      const signal = this.#controller?.signal;
+      if (!signal || signal.aborted) return;
+      void this.runSearch({ signal, dueOnly: true })
+        .catch((error) => this.#log({ event: "inventory_search_loop_failed", error: safeError(error) }))
+        .finally(() => this.scheduleSearch(60_000));
+    }, delayMs);
+    this.#searchTimer.unref?.();
+  }
+
+  private async executeSearch(options: {
+    signal?: AbortSignal;
+    watchIds?: string[];
+    dryRun?: boolean;
+    deliverNotifications?: boolean;
+    dueOnly?: boolean;
+  }): Promise<SearchMonitorSummary> {
+    options.signal?.throwIfAborted();
+    const database = this.#databaseFactory();
+    const startedAt = this.#now().toISOString();
+    const runId = options.dryRun ? undefined : database.startMonitorRun("search", startedAt);
+    const summary: SearchMonitorSummary = {
+      watchesConsidered: 0,
+      watchesRun: 0,
+      failures: 0,
+      newResults: 0,
+      notificationsRecommended: 0,
+      results: [],
+      delivery: { claimed: 0, sent: 0, failed: 0, terminal: 0 },
+      ...(options.dryRun ? { dryRun: true as const } : {}),
+    };
+    try {
+      if (!this.#searchClient) throw new Error("Search watches require a configured web search provider.");
+      const selectedIds = options.watchIds ? new Set(options.watchIds) : undefined;
+      const nowMs = this.#now().getTime();
+      const watches = database.listSearchWatches().filter((watch) =>
+        watch.enabled &&
+        (!selectedIds || selectedIds.has(watch.id)) &&
+        (!options.dueOnly || !watch.nextCheckAt || Date.parse(watch.nextCheckAt) <= nowMs),
+      );
+      summary.watchesConsidered = database.listSearchWatches().filter(({ enabled }) => enabled).length;
+      const discord = this.#config.notifications.discord;
+      const notification = discord?.enabled && options.deliverNotifications !== false
+        ? {
+            channel: "discord",
+            target: discord.target,
+            accountId: discord.accountId,
+            threadId: discord.threadId,
+          }
+        : undefined;
+      const service = new SearchWatchService(database, this.#searchClient, this.#now);
+      for (const watch of watches) {
+        try {
+          const result = await service.run(watch.id, {
+            signal: options.signal,
+            dryRun: options.dryRun,
+            notification,
+          });
+          summary.watchesRun += 1;
+          summary.newResults += result.newResults.length;
+          summary.notificationsRecommended += result.notificationsRecommended;
+          summary.results.push(result);
+        } catch (error) {
+          options.signal?.throwIfAborted();
+          summary.failures += 1;
+          this.#log({ event: "inventory_search_watch_failed", watch_id: watch.id, error: safeError(error) });
+        }
+      }
+      if (!options.dryRun && options.deliverNotifications !== false) {
+        summary.delivery = await new NotificationDispatcher(
+          database,
+          this.#channels,
+          {
+            maxAttempts: this.#config.notifications.maxAttempts,
+            batchSize: this.#config.notifications.batchSize,
+            baseRetryMs: this.#config.notifications.baseRetrySeconds * 1_000,
+          },
+          this.#now,
+        ).dispatch({ signal: options.signal });
+      }
+      if (runId !== undefined) {
+        database.completeMonitorRun(runId, { completedAt: this.#now().toISOString(), summary });
+      }
+      return summary;
+    } catch (error) {
+      if (runId !== undefined) {
+        database.completeMonitorRun(runId, {
+          completedAt: this.#now().toISOString(),
+          error: safeError(error),
+        });
+      }
+      throw error;
+    } finally {
+      database.close();
+    }
   }
 
   private async executeFast(

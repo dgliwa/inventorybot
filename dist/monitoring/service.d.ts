@@ -4,6 +4,7 @@ import { validateRetailerAdapter } from "../generation/validate-adapter.js";
 import { inspectRetailerStatic } from "../inspection/static.js";
 import type { NotificationChannel } from "../notifications/types.js";
 import type { InventoryDatabase } from "../persistence/db.js";
+import type { SearchWatchRunResult } from "../search-watches/types.js";
 import type { InventoryBotConfig } from "./config.js";
 export type FastMonitorSummary = {
     watches: number;
@@ -16,6 +17,21 @@ export type FastMonitorSummary = {
         failed: number;
         terminal: number;
     };
+};
+export type SearchMonitorSummary = {
+    watchesConsidered: number;
+    watchesRun: number;
+    failures: number;
+    newResults: number;
+    notificationsRecommended: number;
+    results: SearchWatchRunResult[];
+    delivery: {
+        claimed: number;
+        sent: number;
+        failed: number;
+        terminal: number;
+    };
+    dryRun?: true;
 };
 export type SlowMonitorSummary = {
     watchesConsidered: number;
@@ -53,6 +69,7 @@ export declare class InventoryMonitor {
         running: {
             fast: boolean;
             slow: boolean;
+            search: boolean;
         };
         intervals: {
             fastSeconds: number;
@@ -69,9 +86,18 @@ export declare class InventoryMonitor {
         watchIds?: string[];
         dryRun?: boolean;
     }): Promise<SlowMonitorSummary>;
+    runSearch(options?: {
+        signal?: AbortSignal;
+        watchIds?: string[];
+        dryRun?: boolean;
+        deliverNotifications?: boolean;
+        dueOnly?: boolean;
+    }): Promise<SearchMonitorSummary>;
     private combineWithLifecycleSignal;
     private scheduleFast;
     private scheduleSlow;
+    private scheduleSearch;
+    private executeSearch;
     private executeFast;
     private previewSlow;
     private executeSlow;

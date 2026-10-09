@@ -4,6 +4,7 @@ import type { RetailerCandidate } from "../discovery/types.js";
 import type { AdapterCandidate, AdapterValidationReport } from "../generation/types.js";
 import type { RetailerInspection } from "../inspection/types.js";
 import type { NotificationPayload, PendingNotification } from "../notifications/types.js";
+import type { RetailerSearchWatch, RetailerSearchWatchResult } from "../search-watches/types.js";
 import type { InventoryWatch } from "../watches/types.js";
 export type CreateWatchRecord = {
     id: string;
@@ -57,6 +58,43 @@ export declare class InventoryDatabase {
     listWatches(): InventoryWatch[];
     disableWatch(id: string): boolean;
     removeWatch(id: string): boolean;
+    createSearchWatch(watch: RetailerSearchWatch): RetailerSearchWatch;
+    getSearchWatch(id: string): RetailerSearchWatch | undefined;
+    listSearchWatches(): RetailerSearchWatch[];
+    updateSearchWatch(id: string, changes: {
+        domain?: string;
+        query?: string;
+        cadenceMinutes?: number;
+        enabled?: boolean;
+        notifyOnInitialResults?: boolean;
+        updatedAt: string;
+        resetBaseline?: boolean;
+    }): RetailerSearchWatch | undefined;
+    disableSearchWatch(id: string, updatedAt: string): boolean;
+    removeSearchWatch(id: string): boolean;
+    listSearchWatchResults(watchId: string, limit?: number): RetailerSearchWatchResult[];
+    recordSearchWatchResults(input: {
+        watchId: string;
+        results: Array<{
+            url: string;
+            title?: string;
+            snippet?: string;
+        }>;
+        checkedAt: string;
+        nextCheckAt: string;
+    }): RetailerSearchWatchResult[];
+    enqueueNotification(input: {
+        sourceKind: string;
+        sourceId: string;
+        fingerprint: string;
+        channel: string;
+        target: string;
+        accountId?: string;
+        threadId?: string;
+        transition: string;
+        payload: NotificationPayload;
+        createdAt: string;
+    }): boolean;
     latestStatus(targetId: string): InventoryStatus | undefined;
     recordObservation(input: {
         watchId: string;
@@ -106,7 +144,7 @@ export declare class InventoryDatabase {
         suppressed: number;
         failed: number;
     };
-    startMonitorRun(kind: "fast" | "slow", startedAt: string): number;
+    startMonitorRun(kind: "fast" | "slow" | "search", startedAt: string): number;
     completeMonitorRun(id: number, input: {
         completedAt: string;
         summary?: unknown;
