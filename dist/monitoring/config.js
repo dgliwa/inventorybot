@@ -12,6 +12,7 @@ export function parseInventoryBotConfig(value) {
     const root = record(value);
     const persistence = record(root.persistence);
     const monitoring = record(root.monitoring);
+    const searchMonitoring = record(root.searchMonitoring);
     const notifications = record(root.notifications);
     const discord = record(notifications.discord);
     return {
@@ -30,6 +31,9 @@ export function parseInventoryBotConfig(value) {
             perDomainConcurrency: number(monitoring.perDomainConcurrency, 1, 1, 10),
             jitterSeconds: number(monitoring.jitterSeconds, 15, 0, 3_600),
             notifyWhenUnavailable: monitoring.notifyWhenUnavailable === true,
+        },
+        searchMonitoring: {
+            enabled: searchMonitoring.enabled === true,
         },
         notifications: {
             ...(discord.enabled === true && typeof discord.target === "string" && discord.target.trim()

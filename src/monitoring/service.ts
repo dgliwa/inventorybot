@@ -125,11 +125,16 @@ export class InventoryMonitor {
   }
 
   start(): void {
-    if (this.#controller || !this.#config.monitoring.enabled) return;
+    if (
+      this.#controller ||
+      (!this.#config.monitoring.enabled && !this.#config.searchMonitoring.enabled)
+    ) return;
     this.#controller = new AbortController();
-    this.scheduleFast(this.#config.monitoring.fastIntervalSeconds * 1_000);
-    this.scheduleSlow(this.#config.monitoring.slowIntervalHours * 60 * 60_000);
-    this.scheduleSearch(60_000);
+    if (this.#config.monitoring.enabled) {
+      this.scheduleFast(this.#config.monitoring.fastIntervalSeconds * 1_000);
+      this.scheduleSlow(this.#config.monitoring.slowIntervalHours * 60 * 60_000);
+    }
+    if (this.#config.searchMonitoring.enabled) this.scheduleSearch(60_000);
   }
 
   async stop(): Promise<void> {
@@ -150,7 +155,7 @@ export class InventoryMonitor {
     intervals: { fastSeconds: number; slowHours: number };
   } {
     return {
-      enabled: this.#config.monitoring.enabled,
+      enabled: this.#config.monitoring.enabled || this.#config.searchMonitoring.enabled,
       running: {
         fast: Boolean(this.#fastRun),
         slow: Boolean(this.#slowRun),

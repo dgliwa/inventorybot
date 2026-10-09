@@ -216,6 +216,14 @@ const inventoryToolPlugin = defineToolPlugin({
           { additionalProperties: false },
         ),
       ),
+      searchMonitoring: Type.Optional(
+        Type.Object(
+          {
+            enabled: Type.Optional(Type.Boolean({ default: false })),
+          },
+          { additionalProperties: false },
+        ),
+      ),
       notifications: Type.Optional(
         Type.Object(
           {
@@ -789,6 +797,7 @@ const inventoryToolPlugin = defineToolPlugin({
               fastIntervalSeconds: parsed.monitoring.fastIntervalSeconds,
               slowIntervalHours: parsed.monitoring.slowIntervalHours,
               discordEnabled: parsed.notifications.discord?.enabled === true,
+              searchMonitoringEnabled: parsed.searchMonitoring.enabled,
             },
             adapterCoverage: {
               watches: watches.length,

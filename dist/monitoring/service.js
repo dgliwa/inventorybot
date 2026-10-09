@@ -61,12 +61,16 @@ export class InventoryMonitor {
         this.#now = dependencies.now ?? (() => new Date());
     }
     start() {
-        if (this.#controller || !this.#config.monitoring.enabled)
+        if (this.#controller ||
+            (!this.#config.monitoring.enabled && !this.#config.searchMonitoring.enabled))
             return;
         this.#controller = new AbortController();
-        this.scheduleFast(this.#config.monitoring.fastIntervalSeconds * 1_000);
-        this.scheduleSlow(this.#config.monitoring.slowIntervalHours * 60 * 60_000);
-        this.scheduleSearch(60_000);
+        if (this.#config.monitoring.enabled) {
+            this.scheduleFast(this.#config.monitoring.fastIntervalSeconds * 1_000);
+            this.scheduleSlow(this.#config.monitoring.slowIntervalHours * 60 * 60_000);
+        }
+        if (this.#config.searchMonitoring.enabled)
+            this.scheduleSearch(60_000);
     }
     async stop() {
         this.#controller?.abort();
@@ -84,7 +88,7 @@ export class InventoryMonitor {
     }
     status() {
         return {
-            enabled: this.#config.monitoring.enabled,
+            enabled: this.#config.monitoring.enabled || this.#config.searchMonitoring.enabled,
             running: {
                 fast: Boolean(this.#fastRun),
                 slow: Boolean(this.#slowRun),

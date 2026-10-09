@@ -17,6 +17,9 @@ export type InventoryBotConfig = {
         jitterSeconds: number;
         notifyWhenUnavailable: boolean;
     };
+    searchMonitoring: {
+        enabled: boolean;
+    };
     notifications: {
         discord?: {
             enabled: boolean;

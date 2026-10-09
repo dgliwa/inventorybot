@@ -172,7 +172,7 @@ Searches use `site:<domain> "<interest>"`, reject other domains, require the int
 }
 ```
 
-When monitoring is enabled, the scheduler checks every minute for search watches whose individual cadence is due.
+Set `searchMonitoring.enabled: true` to run search watches without enabling the inventory fast/slow loops. The scheduler checks every minute for search watches whose individual cadence is due.
 
 ## Fast loop
 
