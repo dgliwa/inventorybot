@@ -35,7 +35,11 @@ describe("SearchWatchService", () => {
         url: "https://www.costco.com/magic-the-gathering-box.product.1.html?utm_source=test",
         title: "Magic: Gathering Box",
       }];
-      const watch = await service.add({ domain: "costco.com", query: "magic gathering" });
+      const watch = await service.add({
+        domain: "costco.com",
+        query: "magic gathering",
+        notifyOnInitialResults: false,
+      });
       expect(watch).toMatchObject({
         domain: "costco.com",
         cadenceMinutes: 60,
@@ -55,6 +59,25 @@ describe("SearchWatchService", () => {
         matchedResults: 2,
         notificationsRecommended: 1,
         newResults: [{ url: "https://www.costco.com/magic-the-gathering-bundle.product.2.html" }],
+      });
+      expect(database.notificationStatus()).toMatchObject({ pending: 1 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("notifies for initial matching results by default", async () => {
+    const database = new InventoryDatabase(":memory:");
+    const client = new MutableSearchClient();
+    const service = new SearchWatchService(database, client);
+    try {
+      client.results = [{ url: "https://costco.com/magic-box", title: "Magic Gathering Box" }];
+      const watch = await service.add({ domain: "costco.com", query: "magic gathering" });
+      await expect(service.run(watch.id, {
+        notification: { channel: "discord", target: "channel:123" },
+      })).resolves.toMatchObject({
+        baselineEstablished: true,
+        notificationsRecommended: 1,
       });
       expect(database.notificationStatus()).toMatchObject({ pending: 1 });
     } finally {

@@ -82,7 +82,7 @@ export class SearchWatchService {
       query,
       cadenceMinutes,
       enabled: input.enabled ?? true,
-      notifyOnInitialResults: input.notifyOnInitialResults ?? false,
+      notifyOnInitialResults: input.notifyOnInitialResults ?? true,
       adapter: discovery.adapter,
       createdAt: now,
       updatedAt: now,

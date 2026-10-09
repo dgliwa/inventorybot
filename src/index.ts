@@ -655,7 +655,7 @@ const inventoryToolPlugin = defineToolPlugin({
             Type.Integer({ minimum: 5, maximum: 43_200, default: 60 }),
           ),
           enabled: Type.Optional(Type.Boolean({ default: true })),
-          notifyOnInitialResults: Type.Optional(Type.Boolean({ default: false })),
+          notifyOnInitialResults: Type.Optional(Type.Boolean({ default: true })),
         },
         { additionalProperties: false },
       ),

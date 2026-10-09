@@ -163,14 +163,14 @@ Search watches monitor a retailer's own search results rather than checking one 
 
 Registration dynamically selects a supported deterministic adapter. It first looks for a public GET search form; retailer-specific detectors can instead validate a public catalog API, such as Costco's GRS JSON search endpoint. The selected endpoint runs twice and must return at least one stable matching product URL before anything is persisted. Scheduled runs call the stored adapter directly and never use a general web-search provider. Unsupported JavaScript-only, authenticated, blocked, off-domain, oversized, or unparseable searches fail safely with no watch creation.
 
-Result URLs are normalized and permanently deduplicated. The first scheduled run establishes a silent baseline by default; set `notifyOnInitialResults: true` to alert on existing matches. Changing the retailer or search phrase validates a replacement adapter before resetting the baseline, while changing only cadence preserves result history.
+Result URLs are normalized and permanently deduplicated. The first scheduled run notifies for existing matches by default; set `notifyOnInitialResults: false` when a silent baseline is preferred. Changing the retailer or search phrase validates a replacement adapter before resetting the baseline, while changing only cadence preserves result history.
 
 ```json
 {
   "domain": "costco.com",
   "query": "magic the gathering",
   "cadenceMinutes": 60,
-  "notifyOnInitialResults": false
+  "notifyOnInitialResults": true
 }
 ```
 
