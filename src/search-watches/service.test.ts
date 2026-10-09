@@ -6,6 +6,7 @@ import type { DeterministicSearchAdapter, DeterministicSearchClient } from "./ty
 
 const adapter: DeterministicSearchAdapter = {
   version: 1,
+  kind: "html_get",
   domain: "costco.com",
   searchUrl: "https://www.costco.com/search",
   queryParameter: "keyword",

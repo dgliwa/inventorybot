@@ -17,5 +17,7 @@ export declare class DirectRetailerSearchClient implements DeterministicSearchCl
         results: SearchResult[];
     }>;
     search(adapter: DeterministicSearchAdapter, query: string, count: number, signal?: AbortSignal): Promise<SearchResult[]>;
+    private discoverCostcoGrs;
+    private searchCostcoGrs;
     private fetchPage;
 }

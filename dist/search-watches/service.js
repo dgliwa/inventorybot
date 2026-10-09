@@ -84,9 +84,9 @@ export class SearchWatchService {
         if (input.cadenceMinutes !== undefined && (!Number.isInteger(input.cadenceMinutes) || input.cadenceMinutes < 5)) {
             throw new Error("Search cadence must be an integer of at least 5 minutes.");
         }
-        const resetBaseline = domain !== current.domain || query !== current.query;
+        const resetBaseline = domain !== current.domain || query !== current.query || !current.adapter;
         let adapter = current.adapter;
-        if (resetBaseline || !adapter) {
+        if (resetBaseline) {
             input.signal?.throwIfAborted();
             adapter = (await this.searchClient.discover(domain, query, input.signal)).adapter;
         }
@@ -178,10 +178,17 @@ export class SearchWatchService {
                     notificationsRecommended += 1;
             }
         }
-        const searchUrl = new URL(watch.adapter.searchUrl);
-        for (const [key, value] of Object.entries(watch.adapter.fixedParameters))
-            searchUrl.searchParams.set(key, value);
-        searchUrl.searchParams.set(watch.adapter.queryParameter, watch.query);
+        const searchUrl = watch.adapter.kind === "html_get"
+            ? new URL(watch.adapter.searchUrl)
+            : new URL("https://www.costco.com/s");
+        if (watch.adapter.kind === "html_get") {
+            for (const [key, value] of Object.entries(watch.adapter.fixedParameters))
+                searchUrl.searchParams.set(key, value);
+            searchUrl.searchParams.set(watch.adapter.queryParameter, watch.query);
+        }
+        else {
+            searchUrl.searchParams.set("keyword", watch.query);
+        }
         return {
             watchId: watch.id,
             domain: watch.domain,

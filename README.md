@@ -161,7 +161,7 @@ Search watches monitor a retailer's own search results rather than checking one 
 - `inventory_search_watch_run` — execute selected or all enabled site adapters now; supports a no-write `dryRun`
 - `inventory_search_watch_remove` — disable by default or permanently delete with confirmation
 
-Registration fetches the retailer homepage, finds a public GET search form, executes the discovered endpoint twice, and requires at least one stable matching product URL before persisting anything. Scheduled runs call that endpoint directly and never use a general web-search provider. JavaScript-only, authenticated, POST-only, blocked, off-domain, oversized, or unparseable searches fail safely with no watch creation.
+Registration dynamically selects a supported deterministic adapter. It first looks for a public GET search form; retailer-specific detectors can instead validate a public catalog API, such as Costco's GRS JSON search endpoint. The selected endpoint runs twice and must return at least one stable matching product URL before anything is persisted. Scheduled runs call the stored adapter directly and never use a general web-search provider. Unsupported JavaScript-only, authenticated, blocked, off-domain, oversized, or unparseable searches fail safely with no watch creation.
 
 Result URLs are normalized and permanently deduplicated. The first scheduled run establishes a silent baseline by default; set `notifyOnInitialResults: true` to alert on existing matches. Changing the retailer or search phrase validates a replacement adapter before resetting the baseline, while changing only cadence preserves result history.
 

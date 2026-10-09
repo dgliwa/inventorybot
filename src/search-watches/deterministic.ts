@@ -1,7 +1,7 @@
 import { domainMatches, normalizeDomain } from "../adapters/url.js";
 import type { SearchResult } from "../discovery/types.js";
 import { assertPublicHttpUrl, type HostResolver } from "../inspection/url-safety.js";
-import type { DeterministicSearchAdapter, DeterministicSearchClient } from "./types.js";
+import type { CostcoGrsSearchAdapter, DeterministicSearchAdapter, DeterministicSearchClient } from "./types.js";
 
 export type SearchFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
@@ -214,6 +214,9 @@ export class DirectRetailerSearchClient implements DeterministicSearchClient {
     const homepageResponse = await this.fetchPage(homepage.toString(), signal);
     const form = discoverForm(homepageResponse.html, homepageResponse.url, normalizedDomain);
     if (!form) {
+      if (normalizedDomain === "costco.com" || normalizedDomain === "www.costco.com") {
+        return this.discoverCostcoGrs(homepageResponse.html, normalizedDomain, query, signal);
+      }
       throw new SearchAdapterDiscoveryError(
         "SEARCH_FORM_NOT_FOUND",
         `No deterministic GET search form was found on ${normalizedDomain}.`,
@@ -222,6 +225,7 @@ export class DirectRetailerSearchClient implements DeterministicSearchClient {
     }
     const provisional: DeterministicSearchAdapter = {
       version: 1,
+      kind: "html_get",
       domain: normalizedDomain,
       searchUrl: form.searchUrl,
       queryParameter: form.queryParameter,
@@ -254,8 +258,14 @@ export class DirectRetailerSearchClient implements DeterministicSearchClient {
   }
 
   async search(adapter: DeterministicSearchAdapter, query: string, count: number, signal?: AbortSignal): Promise<SearchResult[]> {
-    if (adapter.version !== 1 || adapter.parser !== "html_links") {
-      throw new Error("Unsupported deterministic search adapter version or parser.");
+    if (adapter.version !== 1) {
+      throw new Error("Unsupported deterministic search adapter version.");
+    }
+    if (adapter.kind === "costco_grs") {
+      return this.searchCostcoGrs(adapter, query, count, signal);
+    }
+    if (adapter.kind !== "html_get" || adapter.parser !== "html_links") {
+      throw new Error("Unsupported deterministic search adapter kind or parser.");
     }
     const url = new URL(adapter.searchUrl);
     for (const [key, value] of Object.entries(adapter.fixedParameters)) url.searchParams.set(key, value);
@@ -269,6 +279,152 @@ export class DirectRetailerSearchClient implements DeterministicSearchClient {
       );
     }
     return parseResults(page.html, page.url, adapter.domain, query, count);
+  }
+
+  private async discoverCostcoGrs(
+    homepageHtml: string,
+    domain: string,
+    query: string,
+    signal?: AbortSignal,
+  ): Promise<{ adapter: DeterministicSearchAdapter; results: SearchResult[] }> {
+    const endpoint = "https://gdx-api.costco.com/catalog/search/api/v1/search?searchType=page";
+    if (!homepageHtml.includes(endpoint.split("?")[0])) {
+      throw new SearchAdapterDiscoveryError(
+        "SEARCH_RETAILER_API_NOT_FOUND",
+        "Costco's public catalog search configuration was not present on its homepage.",
+        "Retry after Costco's site is available or update the retailer-specific adapter detector.",
+      );
+    }
+    const endpointIndex = homepageHtml.indexOf(endpoint.split("?")[0]);
+    const configuration = homepageHtml.slice(endpointIndex, endpointIndex + 2_000);
+    const clientIdentifier = configuration.match(/client-identifier\\?"\s*:\s*\\?"([0-9a-f-]{36})/i)?.[1];
+    const warehouseId = homepageHtml.match(/warehouseNumber\\?"\s*:\s*\\?"(\d+)/i)?.[1];
+    if (!clientIdentifier || !warehouseId) {
+      throw new SearchAdapterDiscoveryError(
+        "SEARCH_RETAILER_API_CONFIG_INVALID",
+        "Costco's public search configuration was incomplete.",
+        "Inspect Costco's current catalog application configuration before registering the watch.",
+      );
+    }
+    const provisional: CostcoGrsSearchAdapter = {
+      version: 1,
+      kind: "costco_grs",
+      domain: "costco.com",
+      searchUrl: endpoint,
+      clientIdentifier,
+      clientId: "USBC",
+      locale: "en-US",
+      warehouseId,
+      parser: "costco_grs_v1",
+      validatedAt: this.now().toISOString(),
+      validationResultCount: 0,
+    };
+    const first = await this.searchCostcoGrs(provisional, query, 50, signal);
+    if (first.length === 0) {
+      throw new SearchAdapterDiscoveryError(
+        "SEARCH_RESULTS_NOT_PARSEABLE",
+        `Costco's catalog API returned no matching products for “${query}”.`,
+        "Verify Costco currently has matching catalog products before registering the watch.",
+      );
+    }
+    const second = await this.searchCostcoGrs(provisional, query, 50, signal);
+    const repeated = new Set(second.map((result) => result.url));
+    if (!first.some((result) => repeated.has(result.url))) {
+      throw new SearchAdapterDiscoveryError(
+        "SEARCH_ADAPTER_VALIDATION_FAILED",
+        "Repeated Costco catalog searches did not return a stable product URL.",
+        "Retry later; the retailer API may be unstable or returning personalized results.",
+      );
+    }
+    return {
+      adapter: { ...provisional, validationResultCount: first.length },
+      results: first,
+    };
+  }
+
+  private async searchCostcoGrs(
+    adapter: CostcoGrsSearchAdapter,
+    query: string,
+    count: number,
+    signal?: AbortSignal,
+  ): Promise<SearchResult[]> {
+    await assertPublicHttpUrl(adapter.searchUrl, this.resolver);
+    const timeoutSignal = AbortSignal.timeout(15_000);
+    const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+    const response = await this.fetchImpl(adapter.searchUrl, {
+      method: "POST",
+      redirect: "manual",
+      signal: requestSignal,
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+        "client-identifier": adapter.clientIdentifier,
+        client_id: adapter.clientId,
+        locale: adapter.locale,
+        searchResultProvider: "GRS",
+        origin: "https://www.costco.com",
+        referer: `https://www.costco.com/s?keyword=${encodeURIComponent(query)}`,
+        "user-agent": "InventoryBot/0.1 deterministic-search-monitor",
+      },
+      body: JSON.stringify({
+        deliveryLocations: [],
+        filterBy: [],
+        offset: 0,
+        pageSize: Math.min(count, 50),
+        personalizationEnabled: false,
+        query,
+        searchMode: "page",
+        visitorId: crypto.randomUUID(),
+        warehouseId: adapter.warehouseId,
+        shipToState: "",
+        shipToPostal: "",
+        pageCategories: [],
+      }),
+    });
+    if (response.status >= 300 && response.status < 400) {
+      throw new SearchAdapterDiscoveryError(
+        "SEARCH_RETAILER_API_REDIRECTED",
+        `Costco's catalog API redirected with HTTP ${response.status}.`,
+        "Reinspect Costco's current public catalog endpoint.",
+      );
+    }
+    if (!response.ok) {
+      throw new SearchAdapterDiscoveryError(
+        response.status === 401 || response.status === 403 ? "SEARCH_SITE_BLOCKED" : "SEARCH_HTTP_ERROR",
+        `Costco's catalog API returned HTTP ${response.status}.`,
+        "Reinspect Costco's public application configuration; do not bypass authentication or access controls.",
+      );
+    }
+    const declaredLength = Number(response.headers.get("content-length"));
+    if (Number.isFinite(declaredLength) && declaredLength > 5_000_000) {
+      throw new SearchAdapterDiscoveryError(
+        "SEARCH_RESPONSE_TOO_LARGE",
+        "Costco's catalog API response exceeded 5000000 bytes.",
+        "Use a smaller bounded result page.",
+      );
+    }
+    const payload = await response.json() as {
+      searchResult?: {
+        results?: Array<{ product?: { title?: string; uri?: string } }>;
+      };
+    };
+    const unique = new Map<string, SearchResult>();
+    for (const item of payload.searchResult?.results ?? []) {
+      const title = item.product?.title?.trim();
+      const rawUrl = item.product?.uri;
+      if (!title || !rawUrl) continue;
+      try {
+        const url = new URL(rawUrl);
+        if (!domainMatches(normalizeDomain(url.toString()), adapter.domain)) continue;
+        const result = { url: url.toString(), title };
+        if (!matchesQuery(result, query)) continue;
+        unique.set(result.url, result);
+      } catch {
+        // Ignore malformed retailer results.
+      }
+      if (unique.size >= count) break;
+    }
+    return [...unique.values()];
   }
 
   private async fetchPage(url: string, signal?: AbortSignal): Promise<{ url: string; html: string }> {

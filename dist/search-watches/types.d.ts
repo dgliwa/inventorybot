@@ -1,14 +1,27 @@
 import type { SearchResult } from "../discovery/types.js";
-export type DeterministicSearchAdapter = {
+type SearchAdapterMetadata = {
     version: 1;
     domain: string;
+    validatedAt: string;
+    validationResultCount: number;
+};
+export type HtmlGetSearchAdapter = SearchAdapterMetadata & {
+    kind: "html_get";
     searchUrl: string;
     queryParameter: string;
     fixedParameters: Record<string, string>;
     parser: "html_links";
-    validatedAt: string;
-    validationResultCount: number;
 };
+export type CostcoGrsSearchAdapter = SearchAdapterMetadata & {
+    kind: "costco_grs";
+    searchUrl: string;
+    clientIdentifier: string;
+    clientId: "USBC";
+    locale: "en-US";
+    warehouseId: string;
+    parser: "costco_grs_v1";
+};
+export type DeterministicSearchAdapter = HtmlGetSearchAdapter | CostcoGrsSearchAdapter;
 export type RetailerSearchWatch = {
     id: string;
     domain: string;
@@ -45,3 +58,4 @@ export interface DeterministicSearchClient {
     }>;
     search(adapter: DeterministicSearchAdapter, query: string, count: number, signal?: AbortSignal): Promise<SearchResult[]>;
 }
+export {};
