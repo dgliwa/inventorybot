@@ -258,3 +258,23 @@ Scheduler, discovery, inspection, and delivery failures emit separate structured
 - Browser and network-traffic inspection are not implemented.
 - Newly discovered retailer candidates require operator review before becoming watch targets.
 - Scheduling is process-local, while run history, observations, pre-handoff outbox work, and leases are durable in InventoryBot SQLite; accepted delivery work is durable in OpenClaw's outbound queue.
+
+### Target keyword-search adapter
+
+Target search watches read the public storefront's embedded Redsky configuration
+and GET plp_search_v2 catalog endpoint instead of its JavaScript-only search form.
+Configuration is JSON-decoded without executing scripts. No account credentials,
+cookies, or anti-bot bypass are used. Registration requires stable matching URLs
+across two searches. Searches inspect at most three 24-product pages and return
+at most 50 matches: this is discovery, not stock status or an exhaustive crawl.
+Matching uses every query token. HTTPS Target product URLs are canonicalized by
+TCIN. The API endpoint is allowlisted, public DNS checks retained, redirects not
+followed, and response bytes and request time bounded.
+
+Live validation on 2026-10-09: public search HTML returned HTTP 200 and its
+configuration parsed, but the API returned HTTP 435 with an access-denied
+challenge. The adapter reports SEARCH_SITE_BLOCKED, not an empty catalog or a
+validated watch. Successful live product parsing remains unverified; API tests
+use synthetic fixtures. Do not enable a watch until normal permitted access
+succeeds. Build with npm run plugin:validate; loading rebuilt code into the
+running plugin is a separate operator action, not performed by the build.

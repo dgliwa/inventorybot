@@ -1,25 +1,8 @@
+import { discoverTargetConfig, searchTarget } from "./target.js";
 import { domainMatches, normalizeDomain } from "../adapters/url.js";
 import { assertPublicHttpUrl } from "../inspection/url-safety.js";
-export class SearchAdapterDiscoveryError extends Error {
-    code;
-    nextAction;
-    constructor(code, message, nextAction) {
-        super(message);
-        this.code = code;
-        this.nextAction = nextAction;
-        this.name = "SearchAdapterDiscoveryError";
-    }
-}
-function decodeHtml(value) {
-    return value
-        .replace(/&amp;/gi, "&")
-        .replace(/&quot;/gi, '"')
-        .replace(/&#39;|&apos;/gi, "'")
-        .replace(/&lt;/gi, "<")
-        .replace(/&gt;/gi, ">")
-        .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
-        .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(Number.parseInt(code, 16)));
-}
+import { decodeHtml, matchesQuery, readBounded, SearchAdapterDiscoveryError, textContent } from "./parsing.js";
+export { SearchAdapterDiscoveryError } from "./parsing.js";
 function attributes(source) {
     const result = {};
     const pattern = /([:\w-]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
@@ -27,45 +10,6 @@ function attributes(source) {
         result[match[1].toLowerCase()] = decodeHtml(match[2] ?? match[3] ?? match[4] ?? "");
     }
     return result;
-}
-function textContent(value) {
-    return decodeHtml(value.replace(/<script\b[\s\S]*?<\/script>/gi, " ")
-        .replace(/<style\b[\s\S]*?<\/style>/gi, " ")
-        .replace(/<[^>]+>/g, " "))
-        .replace(/\s+/g, " ")
-        .trim();
-}
-function clean(value) {
-    return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-}
-function matchesQuery(result, query) {
-    const tokens = clean(query).split(" ").filter((token) => token.length > 1);
-    const haystack = clean(`${result.title ?? ""} ${result.snippet ?? ""} ${result.url}`);
-    return tokens.length > 0 && tokens.every((token) => haystack.includes(token));
-}
-async function readBounded(response, maximumBytes = 5_000_000) {
-    const declared = Number(response.headers.get("content-length"));
-    if (Number.isFinite(declared) && declared > maximumBytes) {
-        throw new SearchAdapterDiscoveryError("SEARCH_RESPONSE_TOO_LARGE", `Retailer response exceeds ${maximumBytes} bytes.`, "Use a narrower static search endpoint or add bounded API support.");
-    }
-    if (!response.body)
-        return "";
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let total = 0;
-    let body = "";
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done)
-            break;
-        total += value.byteLength;
-        if (total > maximumBytes) {
-            await reader.cancel();
-            throw new SearchAdapterDiscoveryError("SEARCH_RESPONSE_TOO_LARGE", `Retailer response exceeds ${maximumBytes} bytes.`, "Use a narrower static search endpoint or add bounded API support.");
-        }
-        body += decoder.decode(value, { stream: true });
-    }
-    return body + decoder.decode();
 }
 function discoverForm(html, pageUrl, domain) {
     const candidates = [];
@@ -205,6 +149,18 @@ export class DirectRetailerSearchClient {
         const normalizedDomain = normalizeDomain(domain.includes("://") ? domain : `https://${domain}`);
         const homepage = await assertPublicHttpUrl(`https://${normalizedDomain}/`, this.resolver);
         const homepageResponse = await this.fetchPage(homepage.toString(), signal);
+        if (normalizedDomain === "target.com" || normalizedDomain === "www.target.com") {
+            if (!domainMatches(normalizeDomain(homepageResponse.url), "target.com"))
+                throw new Error("Target redirected off domain.");
+            const adapter = discoverTargetConfig(homepageResponse.html, this.now());
+            const first = await this.search(adapter, query, 50, signal);
+            if (!first.length)
+                throw new SearchAdapterDiscoveryError("SEARCH_RESULTS_NOT_PARSEABLE", "Target returned no matching products.", "Verify matching catalog products exist before registering a watch.");
+            const repeated = new Set((await this.search(adapter, query, 50, signal)).map(result => result.url));
+            if (!first.some(result => repeated.has(result.url)))
+                throw new SearchAdapterDiscoveryError("SEARCH_ADAPTER_VALIDATION_FAILED", "Repeated Target searches returned no stable product URL.", "Retry when the public catalog is stable.");
+            return { adapter: { ...adapter, validationResultCount: first.length }, results: first };
+        }
         const form = discoverForm(homepageResponse.html, homepageResponse.url, normalizedDomain);
         if (!form) {
             if (normalizedDomain === "costco.com" || normalizedDomain === "www.costco.com") {
@@ -240,6 +196,9 @@ export class DirectRetailerSearchClient {
     async search(adapter, query, count, signal) {
         if (adapter.version !== 1) {
             throw new Error("Unsupported deterministic search adapter version.");
+        }
+        if (adapter.kind === "target_redsky") {
+            return searchTarget(adapter, query, count, this.fetchImpl, this.resolver, signal);
         }
         if (adapter.kind === "costco_grs") {
             return this.searchCostcoGrs(adapter, query, count, signal);

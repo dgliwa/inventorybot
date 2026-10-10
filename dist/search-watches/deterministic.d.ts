@@ -1,12 +1,8 @@
 import type { SearchResult } from "../discovery/types.js";
 import { type HostResolver } from "../inspection/url-safety.js";
 import type { DeterministicSearchAdapter, DeterministicSearchClient } from "./types.js";
-export type SearchFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
-export declare class SearchAdapterDiscoveryError extends Error {
-    readonly code: string;
-    readonly nextAction: string;
-    constructor(code: string, message: string, nextAction: string);
-}
+import { type SearchFetch } from "./parsing.js";
+export { SearchAdapterDiscoveryError, type SearchFetch } from "./parsing.js";
 export declare class DirectRetailerSearchClient implements DeterministicSearchClient {
     private readonly fetchImpl;
     private readonly resolver?;

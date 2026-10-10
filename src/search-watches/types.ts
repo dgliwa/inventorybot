@@ -25,7 +25,15 @@ export type CostcoGrsSearchAdapter = SearchAdapterMetadata & {
   parser: "costco_grs_v1";
 };
 
-export type DeterministicSearchAdapter = HtmlGetSearchAdapter | CostcoGrsSearchAdapter;
+export type TargetRedskySearchAdapter = SearchAdapterMetadata & {
+  kind: "target_redsky";
+  searchUrl: string;
+  /** Public storefront application key, not a guest credential. */
+  apiKey: string;
+  parser: "target_redsky_v2";
+};
+
+export type DeterministicSearchAdapter = HtmlGetSearchAdapter | CostcoGrsSearchAdapter | TargetRedskySearchAdapter;
 
 export type RetailerSearchWatch = {
   id: string;
