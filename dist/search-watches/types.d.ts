@@ -26,6 +26,8 @@ export type TargetRedskySearchAdapter = SearchAdapterMetadata & {
     searchUrl: string;
     /** Public storefront application key, not a guest credential. */
     apiKey: string;
+    /** Store context selected by Target's public homepage for catalog pricing. */
+    pricingStoreId: string;
     parser: "target_redsky_v2";
 };
 export type DeterministicSearchAdapter = HtmlGetSearchAdapter | CostcoGrsSearchAdapter | TargetRedskySearchAdapter;

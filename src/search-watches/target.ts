@@ -6,17 +6,25 @@ import { matchesQuery, readBounded, SearchAdapterDiscoveryError, textContent, ty
 const endpoint = "https://redsky.target.com/redsky_aggregations/v1/web/plp_search_v2";
 
 export function discoverTargetConfig(html: string, now: Date): TargetRedskySearchAdapter {
+  let apiKey: string | undefined;
+  let pricingStoreId: string | undefined;
   // Decode embedded JSON only; never evaluate storefront JavaScript.
   for (const match of html.matchAll(/JSON\.parse\(("(?:\\.|[^"\\])*")\)/g)) {
     try {
       const config = JSON.parse(JSON.parse(match[1]));
       const service = config?.services?.redskyAggregations;
-      if (service?.baseUrl !== "https://redsky.target.com" ||
-          new URL(service.apis.product.endpointPaths.plpSearchV2, service.baseUrl).toString() !== endpoint ||
-          typeof service.apiKey !== "string" || !/^[a-z0-9]{20,80}$/i.test(service.apiKey)) continue;
-      return { version: 1, kind: "target_redsky", domain: "target.com", searchUrl: endpoint,
-        apiKey: service.apiKey, parser: "target_redsky_v2", validatedAt: now.toISOString(), validationResultCount: 0 };
+      if (service?.baseUrl === "https://redsky.target.com" &&
+          new URL(service.apis.product.endpointPaths.plpSearchV2, service.baseUrl).toString() === endpoint &&
+          typeof service.apiKey === "string" && /^[a-z0-9]{20,80}$/i.test(service.apiKey)) {
+        apiKey = service.apiKey;
+      }
+      const storeId = config?.serverLocationVariables?.store_id;
+      if (typeof storeId === "string" && /^\d{1,8}$/.test(storeId)) pricingStoreId = storeId;
     } catch { /* Ignore unrelated or malformed configuration. */ }
+  }
+  if (apiKey && pricingStoreId) {
+    return { version: 1, kind: "target_redsky", domain: "target.com", searchUrl: endpoint,
+      apiKey, pricingStoreId, parser: "target_redsky_v2", validatedAt: now.toISOString(), validationResultCount: 0 };
   }
   throw new SearchAdapterDiscoveryError("SEARCH_RETAILER_API_CONFIG_INVALID",
     "Target's public catalog configuration was absent or changed.", "Inspect the public storefront configuration; do not supply private credentials.");
@@ -25,7 +33,8 @@ export function discoverTargetConfig(html: string, now: Date): TargetRedskySearc
 export async function searchTarget(adapter: TargetRedskySearchAdapter, query: string, count: number,
   fetchImpl: SearchFetch, resolver?: HostResolver, signal?: AbortSignal): Promise<SearchResult[]> {
   // Exact allowlist also protects adapters loaded from storage. Never follow API redirects.
-  if (adapter.parser !== "target_redsky_v2" || adapter.domain !== "target.com" || adapter.searchUrl !== endpoint) {
+  if (adapter.parser !== "target_redsky_v2" || adapter.domain !== "target.com" || adapter.searchUrl !== endpoint ||
+      !/^\d{1,8}$/.test(adapter.pricingStoreId)) {
     throw new Error("Unsupported Target search configuration.");
   }
   const limit = Math.min(50, Math.max(0, Math.floor(count)));
@@ -37,7 +46,8 @@ export async function searchTarget(adapter: TargetRedskySearchAdapter, query: st
   for (let offset = 0; offset < 72 && unique.size < limit; offset += 24) {
     const url = new URL(endpoint);
     url.search = new URLSearchParams({ key: adapter.apiKey, keyword: query, count: "24",
-      offset: String(offset), channel: "WEB", page: "/s/" + query }).toString();
+      offset: String(offset), channel: "WEB", page: "/s/" + query,
+      pricing_store_id: adapter.pricingStoreId, visitor_id: "0000000000000000000000000000000000" }).toString();
     await assertPublicHttpUrl(url.toString(), resolver);
     const response = await fetchImpl(url.toString(), { method: "GET", redirect: "manual", signal: requestSignal,
       headers: { accept: "application/json", "user-agent": "InventoryBot/0.1 deterministic-search-monitor" } });
