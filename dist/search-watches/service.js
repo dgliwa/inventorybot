@@ -180,14 +180,16 @@ export class SearchWatchService {
         }
         const searchUrl = watch.adapter.kind === "html_get"
             ? new URL(watch.adapter.searchUrl)
-            : new URL(watch.adapter.kind === "target_redsky" ? "https://www.target.com/s" : "https://www.costco.com/s");
+            : new URL(watch.adapter.kind === "bestbuy_html"
+                ? "https://www.bestbuy.com/site/searchpage.jsp"
+                : "https://www.costco.com/s");
         if (watch.adapter.kind === "html_get") {
             for (const [key, value] of Object.entries(watch.adapter.fixedParameters))
                 searchUrl.searchParams.set(key, value);
             searchUrl.searchParams.set(watch.adapter.queryParameter, watch.query);
         }
         else {
-            searchUrl.searchParams.set(watch.adapter.kind === "target_redsky" ? "searchTerm" : "keyword", watch.query);
+            searchUrl.searchParams.set(watch.adapter.kind === "bestbuy_html" ? "st" : "keyword", watch.query);
         }
         return {
             watchId: watch.id,

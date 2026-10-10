@@ -21,16 +21,12 @@ export type CostcoGrsSearchAdapter = SearchAdapterMetadata & {
     warehouseId: string;
     parser: "costco_grs_v1";
 };
-export type TargetRedskySearchAdapter = SearchAdapterMetadata & {
-    kind: "target_redsky";
-    searchUrl: string;
-    /** Public storefront application key, not a guest credential. */
-    apiKey: string;
-    /** Store context selected by Target's public homepage for catalog pricing. */
-    pricingStoreId: string;
-    parser: "target_redsky_v2";
+export type BestBuyHtmlSearchAdapter = SearchAdapterMetadata & {
+    kind: "bestbuy_html";
+    searchUrl: "https://www.bestbuy.com/site/searchpage.jsp";
+    parser: "bestbuy_search_html";
 };
-export type DeterministicSearchAdapter = HtmlGetSearchAdapter | CostcoGrsSearchAdapter | TargetRedskySearchAdapter;
+export type DeterministicSearchAdapter = HtmlGetSearchAdapter | CostcoGrsSearchAdapter | BestBuyHtmlSearchAdapter;
 export type RetailerSearchWatch = {
     id: string;
     domain: string;

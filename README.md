@@ -259,25 +259,18 @@ Scheduler, discovery, inspection, and delivery failures emit separate structured
 - Newly discovered retailer candidates require operator review before becoming watch targets.
 - Scheduling is process-local, while run history, observations, pre-handoff outbox work, and leases are durable in InventoryBot SQLite; accepted delivery work is durable in OpenClaw's outbound queue.
 
-### Target keyword-search adapter
+### Best Buy keyword-search adapter
 
-Target search watches read the public storefront's embedded Redsky configuration
-and GET plp_search_v2 catalog endpoint instead of its JavaScript-only search form.
-Configuration and Target's public homepage-selected pricing-store context are
-JSON-decoded without executing scripts. Requests include the API's required
-non-identifying visitor placeholder. No account credentials, cookies, or anti-bot
-bypass are used. Registration requires stable matching URLs across two searches.
-Searches inspect at most three 24-product pages and return
-at most 50 matches: this is discovery, not stock status or an exhaustive crawl.
-Matching uses every query token. HTTPS Target product URLs are canonicalized by
-TCIN. The API endpoint is allowlisted, public DNS checks retained, redirects not
-followed, and response bytes and request time bounded.
+Best Buy search watches use the public server-rendered search page at
+`/site/searchpage.jsp`, with `st` for the query and at most three `cp` pages.
+No account credentials, cookies, browser automation, developer API key, or
+anti-bot bypass are used. Registration requires a matching product URL that is
+stable across two searches.
 
-Live validation on 2026-10-10: the public homepage returned HTTP 200. A direct
-public API check briefly returned real catalog JSON after adding Target's now-
-required `pricing_store_id` and `visitor_id`, and the adapter parsed that response.
-A fresh end-to-end adapter run still received Target's HTTP 435 PerimeterX
-challenge, so no watch should be enabled from that run. HTTP 401, 403, 429, or
-435 responses report SEARCH_SITE_BLOCKED and never trigger challenge bypass.
-Build with `npm run plugin:validate`; loading rebuilt code into the running plugin
-is a separate operator action, not performed by the build.
+The adapter returns at most 50 matching products and treats search as discovery,
+not stock status or an exhaustive crawl. Matching requires every query token.
+Only HTTPS Best Buy product URLs are accepted; current product IDs and legacy
+numeric SKUs are canonicalized and deduplicated. The endpoint is strictly
+allowlisted, public-DNS checks remain enabled, redirects are not followed, and
+response bytes and request time are bounded. HTTP 401, 403, 429, and 435 or an
+explicit challenge page fail closed as `SEARCH_SITE_BLOCKED`.

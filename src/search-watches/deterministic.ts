@@ -1,4 +1,4 @@
-import { discoverTargetConfig, searchTarget } from "./target.js";
+import { createBestBuyAdapter, searchBestBuy } from "./bestbuy.js";
 import { domainMatches, normalizeDomain } from "../adapters/url.js";
 import type { SearchResult } from "../discovery/types.js";
 import { assertPublicHttpUrl, type HostResolver } from "../inspection/url-safety.js";
@@ -145,19 +145,18 @@ export class DirectRetailerSearchClient implements DeterministicSearchClient {
 
   async discover(domain: string, query: string, signal?: AbortSignal): Promise<{ adapter: DeterministicSearchAdapter; results: SearchResult[] }> {
     const normalizedDomain = normalizeDomain(domain.includes("://") ? domain : `https://${domain}`);
-    const homepage = await assertPublicHttpUrl(`https://${normalizedDomain}/`, this.resolver);
-    const homepageResponse = await this.fetchPage(homepage.toString(), signal);
-    if (normalizedDomain === "target.com" || normalizedDomain === "www.target.com") {
-      if (!domainMatches(normalizeDomain(homepageResponse.url), "target.com")) throw new Error("Target redirected off domain.");
-      const adapter = discoverTargetConfig(homepageResponse.html, this.now());
+    if (normalizedDomain === "bestbuy.com" || normalizedDomain === "www.bestbuy.com") {
+      const adapter = createBestBuyAdapter(this.now());
       const first = await this.search(adapter, query, 50, signal);
       if (!first.length) throw new SearchAdapterDiscoveryError("SEARCH_RESULTS_NOT_PARSEABLE",
-        "Target returned no matching products.", "Verify matching catalog products exist before registering a watch.");
+        "Best Buy returned no matching products.", "Verify matching products exist before registering a watch.");
       const repeated = new Set((await this.search(adapter, query, 50, signal)).map(result => result.url));
       if (!first.some(result => repeated.has(result.url))) throw new SearchAdapterDiscoveryError("SEARCH_ADAPTER_VALIDATION_FAILED",
-        "Repeated Target searches returned no stable product URL.", "Retry when the public catalog is stable.");
+        "Repeated Best Buy searches returned no stable product URL.", "Retry when the public search page is stable.");
       return { adapter: { ...adapter, validationResultCount: first.length }, results: first };
     }
+    const homepage = await assertPublicHttpUrl(`https://${normalizedDomain}/`, this.resolver);
+    const homepageResponse = await this.fetchPage(homepage.toString(), signal);
     const form = discoverForm(homepageResponse.html, homepageResponse.url, normalizedDomain);
     if (!form) {
       if (normalizedDomain === "costco.com" || normalizedDomain === "www.costco.com") {
@@ -207,8 +206,8 @@ export class DirectRetailerSearchClient implements DeterministicSearchClient {
     if (adapter.version !== 1) {
       throw new Error("Unsupported deterministic search adapter version.");
     }
-    if (adapter.kind === "target_redsky") {
-      return searchTarget(adapter, query, count, this.fetchImpl, this.resolver, signal);
+    if (adapter.kind === "bestbuy_html") {
+      return searchBestBuy(adapter, query, count, this.fetchImpl, this.resolver, signal);
     }
     if (adapter.kind === "costco_grs") {
       return this.searchCostcoGrs(adapter, query, count, signal);
