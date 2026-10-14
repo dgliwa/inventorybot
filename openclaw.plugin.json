@@ -1,7 +1,7 @@
 {
   "id": "inventorybot",
   "name": "InventoryBot",
-  "description": "Discover retailers, validate adapters, schedule inventory watches, and deliver transition notifications.",
+  "description": "Manage general wishlists, discover retailers, validate adapters, schedule inventory watches, and deliver transition notifications.",
   "version": "0.1.0",
   "configSchema": {
     "type": "object",
@@ -75,6 +75,18 @@
   },
   "contracts": {
     "tools": [
+      "inventory_wishlist_add",
+      "inventory_wishlist_update",
+      "inventory_wishlist_transition",
+      "inventory_wishlist_status",
+      "inventory_wishlist_link_add",
+      "inventory_wishlist_link_remove",
+      "inventory_wishlist_purchase_add",
+      "inventory_wishlist_purchase_update",
+      "inventory_wishlist_purchase_delete",
+      "inventory_wishlist_monitor_attach",
+      "inventory_wishlist_monitor_detach",
+      "inventory_wishlist_summary",
       "discover_retailers",
       "check_inventory",
       "inspect_retailer",
@@ -99,6 +111,16 @@
     ]
   },
   "toolMetadata": {
+    "inventory_wishlist_add": { "sideEffecting": true },
+    "inventory_wishlist_update": { "sideEffecting": true },
+    "inventory_wishlist_transition": { "sideEffecting": true },
+    "inventory_wishlist_link_add": { "sideEffecting": true },
+    "inventory_wishlist_link_remove": { "sideEffecting": true },
+    "inventory_wishlist_purchase_add": { "sideEffecting": true },
+    "inventory_wishlist_purchase_update": { "sideEffecting": true },
+    "inventory_wishlist_purchase_delete": { "sideEffecting": true },
+    "inventory_wishlist_monitor_attach": { "sideEffecting": true },
+    "inventory_wishlist_monitor_detach": { "sideEffecting": true },
     "inventory_notification_test": {
       "optional": true,
       "sideEffecting": true

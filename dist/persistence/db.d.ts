@@ -6,6 +6,7 @@ import type { RetailerInspection } from "../inspection/types.js";
 import type { NotificationPayload, PendingNotification } from "../notifications/types.js";
 import type { DeterministicSearchAdapter, RetailerSearchWatch, RetailerSearchWatchResult } from "../search-watches/types.js";
 import type { InventoryWatch } from "../watches/types.js";
+import type { WishlistItem, WishlistItemDetail, WishlistLink, WishlistPriority, WishlistPurchase, WishlistStatus } from "../wishlist/types.js";
 export type CreateWatchRecord = {
     id: string;
     productId: string;
@@ -53,6 +54,50 @@ export declare class InventoryDatabase {
     schemaVersion(): number;
     healthStatus(): InventoryDatabaseHealth;
     migrate(): void;
+    createWishlistItem(item: WishlistItem): void;
+    updateWishlistItem(itemId: string, changes: {
+        name?: string;
+        category?: string | null;
+        priority?: WishlistPriority;
+        desiredQuantity?: number;
+        notes?: string | null;
+        tags?: string[];
+        updatedAt: string;
+    }): boolean;
+    transitionWishlistItem(input: {
+        itemId: string;
+        fromStatus: WishlistStatus;
+        toStatus: WishlistStatus;
+        reason?: string;
+        occurredAt: string;
+    }): void;
+    getWishlistItem(itemId: string): WishlistItem | undefined;
+    listWishlistItemDetails(filters: {
+        status?: WishlistStatus;
+        priority?: WishlistPriority;
+        category?: string;
+        tag?: string;
+        query?: string;
+        includeArchived?: boolean;
+        limit: number;
+    }): WishlistItemDetail[];
+    getWishlistItemDetail(itemId: string): WishlistItemDetail | undefined;
+    createWishlistLink(link: WishlistLink): void;
+    removeWishlistLink(itemId: string, linkId: string): boolean;
+    createWishlistPurchase(purchase: WishlistPurchase): void;
+    getWishlistPurchase(itemId: string, purchaseId: string): WishlistPurchase | undefined;
+    updateWishlistPurchase(itemId: string, purchaseId: string, changes: {
+        quantity?: number;
+        unitPrice?: number | null;
+        currency?: string | null;
+        seller?: string | null;
+        purchasedAt?: string;
+        notes?: string | null;
+        updatedAt: string;
+    }): boolean;
+    removeWishlistPurchase(itemId: string, purchaseId: string): boolean;
+    attachWishlistMonitor(itemId: string, kind: "inventory" | "search", watchId: string, createdAt: string): void;
+    detachWishlistMonitor(itemId: string, kind: "inventory" | "search", watchId: string): boolean;
     createWatch(record: CreateWatchRecord): InventoryWatch;
     getWatch(id: string): InventoryWatch | undefined;
     listWatches(): InventoryWatch[];
@@ -148,7 +193,6 @@ export declare class InventoryDatabase {
     };
     pruneOperationalHistory(cutoff: string): {
         monitorRuns: number;
-        notifications: number;
         searchResults: number;
     };
     startMonitorRun(kind: "fast" | "slow" | "search", startedAt: string): number;

@@ -27,6 +27,12 @@ import { InventoryDatabase } from "./persistence/db.js";
 import { resolveInventoryDatabasePath } from "./persistence/path.js";
 import { checkInventory } from "./tools/check-inventory.js";
 import { WatchService } from "./watches/service.js";
+import { WishlistService } from "./wishlist/service.js";
+import {
+  WISHLIST_LINK_KINDS,
+  WISHLIST_PRIORITIES,
+  WISHLIST_STATUSES,
+} from "./wishlist/types.js";
 
 export const adapterRegistry = new AdapterRegistry([new ExampleJsonLdAdapter()]);
 
@@ -37,6 +43,19 @@ type StateRuntimeApi = {
 function openInventoryDatabase(api: StateRuntimeApi, configuredPath?: string): InventoryDatabase {
   const stateDir = api.runtime.state.resolveStateDir(process.env);
   return new InventoryDatabase(resolveInventoryDatabasePath(stateDir, configuredPath));
+}
+
+function withWishlist<T>(
+  api: StateRuntimeApi,
+  configuredPath: string | undefined,
+  operation: (service: WishlistService) => T,
+): T {
+  const database = openInventoryDatabase(api, configuredPath);
+  try {
+    return operation(new WishlistService(database));
+  } finally {
+    database.close();
+  }
 }
 
 function activeAdapterRegistry(api: OpenClawPluginApi, database: InventoryDatabase): AdapterRegistry {
@@ -110,6 +129,13 @@ const inventoryMethodSchema = Type.Union([
   Type.Literal("browser"),
   Type.Literal("unknown"),
 ]);
+
+const wishlistStatusSchema = Type.Union(WISHLIST_STATUSES.map((value) => Type.Literal(value)));
+const wishlistPrioritySchema = Type.Union(WISHLIST_PRIORITIES.map((value) => Type.Literal(value)));
+const wishlistLinkKindSchema = Type.Union(WISHLIST_LINK_KINDS.map((value) => Type.Literal(value)));
+const wishlistIdSchema = Type.String({ minLength: 1, description: "Wishlist item ID." });
+const nullableTextSchema = Type.Union([Type.String({ minLength: 1 }), Type.Null()]);
+const nullableMoneySchema = Type.Union([Type.Number({ minimum: 0 }), Type.Null()]);
 
 const productIdentitySchema = Type.Object(
   {
@@ -257,6 +283,179 @@ const inventoryToolPlugin = defineToolPlugin({
     { additionalProperties: false },
   ),
   tools: (tool) => [
+    tool({
+      name: "inventory_wishlist_add",
+      description: "Add a general wishlist item. Items default to the idea lifecycle state and create no polling or notifications.",
+      parameters: Type.Object({
+        name: Type.String({ minLength: 1, maxLength: 500 }),
+        category: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
+        priority: Type.Optional(wishlistPrioritySchema),
+        status: Type.Optional(wishlistStatusSchema),
+        desiredQuantity: Type.Optional(Type.Integer({ minimum: 1, maximum: 100_000 })),
+        notes: Type.Optional(Type.String({ minLength: 1, maxLength: 10_000 })),
+        tags: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 100 }), { maxItems: 50 })),
+      }, { additionalProperties: false }),
+      execute: async (input, config, { api, signal }) => {
+        signal?.throwIfAborted();
+        return withWishlist(api, config.persistence?.databasePath, (service) => service.add(input));
+      },
+    }),
+    tool({
+      name: "inventory_wishlist_update",
+      description: "Correct wishlist item metadata without changing lifecycle state. Null clears category or notes.",
+      parameters: Type.Object({
+        itemId: wishlistIdSchema,
+        name: Type.Optional(Type.String({ minLength: 1, maxLength: 500 })),
+        category: Type.Optional(nullableTextSchema),
+        priority: Type.Optional(wishlistPrioritySchema),
+        desiredQuantity: Type.Optional(Type.Integer({ minimum: 1, maximum: 100_000 })),
+        notes: Type.Optional(nullableTextSchema),
+        tags: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 100 }), { maxItems: 50 })),
+      }, { additionalProperties: false }),
+      execute: async ({ itemId, ...input }, config, { api, signal }) => {
+        signal?.throwIfAborted();
+        return withWishlist(api, config.persistence?.databasePath, (service) => service.update(itemId, input));
+      },
+    }),
+    tool({
+      name: "inventory_wishlist_transition",
+      description: "Move an item through idea, researching, wanted, acquired, paused, or archived while retaining transition history.",
+      parameters: Type.Object({
+        itemId: wishlistIdSchema,
+        toStatus: wishlistStatusSchema,
+        reason: Type.Optional(Type.String({ minLength: 1, maxLength: 1_000 })),
+      }, { additionalProperties: false }),
+      execute: async ({ itemId, toStatus, reason }, config, { api, signal }) => {
+        signal?.throwIfAborted();
+        return withWishlist(api, config.persistence?.databasePath, (service) => service.transition(itemId, toStatus, reason));
+      },
+    }),
+    tool({
+      name: "inventory_wishlist_status",
+      description: "Read one or more wishlist items with lifecycle history, links, purchases, acquired quantity, and optional monitor associations.",
+      parameters: Type.Object({
+        itemId: Type.Optional(wishlistIdSchema),
+        status: Type.Optional(wishlistStatusSchema),
+        priority: Type.Optional(wishlistPrioritySchema),
+        category: Type.Optional(Type.String({ minLength: 1 })),
+        tag: Type.Optional(Type.String({ minLength: 1 })),
+        query: Type.Optional(Type.String({ minLength: 1 })),
+        includeArchived: Type.Optional(Type.Boolean({ default: false })),
+        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, default: 50 })),
+      }, { additionalProperties: false }),
+      execute: async (filters, config, { api, signal }) => {
+        signal?.throwIfAborted();
+        return withWishlist(api, config.persistence?.databasePath, (service) => ({ items: service.status(filters) }));
+      },
+    }),
+    tool({
+      name: "inventory_wishlist_link_add",
+      description: "Save a retailer, manufacturer, review, comparison, reference, or other link without enabling polling.",
+      parameters: Type.Object({
+        itemId: wishlistIdSchema,
+        url: Type.String({ format: "uri" }),
+        kind: Type.Optional(wishlistLinkKindSchema),
+        label: Type.Optional(Type.String({ minLength: 1, maxLength: 500 })),
+        price: Type.Optional(Type.Number({ minimum: 0 })),
+        currency: Type.Optional(Type.String({ minLength: 3, maxLength: 10 })),
+      }, { additionalProperties: false }),
+      execute: async ({ itemId, ...input }, config, { api, signal }) => {
+        signal?.throwIfAborted();
+        return withWishlist(api, config.persistence?.databasePath, (service) => service.addLink(itemId, input));
+      },
+    }),
+    tool({
+      name: "inventory_wishlist_link_remove",
+      description: "Remove one saved link from a wishlist item. This never changes a linked InventoryBot monitor.",
+      parameters: Type.Object({ itemId: wishlistIdSchema, linkId: Type.String({ minLength: 1 }) }, { additionalProperties: false }),
+      execute: async ({ itemId, linkId }, config, { api, signal }) => {
+        signal?.throwIfAborted();
+        return withWishlist(api, config.persistence?.databasePath, (service) => service.removeLink(itemId, linkId));
+      },
+    }),
+    tool({
+      name: "inventory_wishlist_purchase_add",
+      description: "Record a purchase against a wishlist item. Acquired and remaining quantities are derived from purchase records.",
+      parameters: Type.Object({
+        itemId: wishlistIdSchema,
+        quantity: Type.Optional(Type.Integer({ minimum: 1, maximum: 100_000 })),
+        unitPrice: Type.Optional(Type.Number({ minimum: 0 })),
+        currency: Type.Optional(Type.String({ minLength: 3, maxLength: 10 })),
+        seller: Type.Optional(Type.String({ minLength: 1, maxLength: 500 })),
+        purchasedAt: Type.Optional(Type.String({ description: "Purchase date as YYYY-MM-DD; defaults to today." })),
+        notes: Type.Optional(Type.String({ minLength: 1, maxLength: 10_000 })),
+      }, { additionalProperties: false }),
+      execute: async ({ itemId, ...input }, config, { api, signal }) => {
+        signal?.throwIfAborted();
+        return withWishlist(api, config.persistence?.databasePath, (service) => service.addPurchase(itemId, input));
+      },
+    }),
+    tool({
+      name: "inventory_wishlist_purchase_update",
+      description: "Correct an existing wishlist purchase. Null clears an optional monetary or descriptive field.",
+      parameters: Type.Object({
+        itemId: wishlistIdSchema,
+        purchaseId: Type.String({ minLength: 1 }),
+        quantity: Type.Optional(Type.Integer({ minimum: 1, maximum: 100_000 })),
+        unitPrice: Type.Optional(nullableMoneySchema),
+        currency: Type.Optional(nullableTextSchema),
+        seller: Type.Optional(nullableTextSchema),
+        purchasedAt: Type.Optional(Type.String({ description: "Purchase date as YYYY-MM-DD." })),
+        notes: Type.Optional(nullableTextSchema),
+      }, { additionalProperties: false }),
+      execute: async ({ itemId, purchaseId, ...input }, config, { api, signal }) => {
+        signal?.throwIfAborted();
+        return withWishlist(api, config.persistence?.databasePath, (service) => service.updatePurchase(itemId, purchaseId, input));
+      },
+    }),
+    tool({
+      name: "inventory_wishlist_purchase_delete",
+      description: "Permanently delete one mistaken purchase record. Requires explicit confirmation.",
+      parameters: Type.Object({
+        itemId: wishlistIdSchema,
+        purchaseId: Type.String({ minLength: 1 }),
+        confirmDeletion: Type.Literal(true),
+      }, { additionalProperties: false }),
+      execute: async ({ itemId, purchaseId }, config, { api, signal }) => {
+        signal?.throwIfAborted();
+        return withWishlist(api, config.persistence?.databasePath, (service) => service.deletePurchase(itemId, purchaseId));
+      },
+    }),
+    tool({
+      name: "inventory_wishlist_monitor_attach",
+      description: "Associate an existing inventory or retailer-search watch with a wishlist item. Association does not enable or run the watch.",
+      parameters: Type.Object({
+        itemId: wishlistIdSchema,
+        kind: Type.Union([Type.Literal("inventory"), Type.Literal("search")]),
+        watchId: Type.String({ minLength: 1 }),
+      }, { additionalProperties: false }),
+      execute: async ({ itemId, kind, watchId }, config, { api, signal }) => {
+        signal?.throwIfAborted();
+        return withWishlist(api, config.persistence?.databasePath, (service) => service.attachMonitor(itemId, kind, watchId));
+      },
+    }),
+    tool({
+      name: "inventory_wishlist_monitor_detach",
+      description: "Remove a wishlist-to-watch association without disabling or deleting either record.",
+      parameters: Type.Object({
+        itemId: wishlistIdSchema,
+        kind: Type.Union([Type.Literal("inventory"), Type.Literal("search")]),
+        watchId: Type.String({ minLength: 1 }),
+      }, { additionalProperties: false }),
+      execute: async ({ itemId, kind, watchId }, config, { api, signal }) => {
+        signal?.throwIfAborted();
+        return withWishlist(api, config.persistence?.databasePath, (service) => service.detachMonitor(itemId, kind, watchId));
+      },
+    }),
+    tool({
+      name: "inventory_wishlist_summary",
+      description: "Summarize active wishlist lifecycle, priority, monitoring, desired/acquired quantities, and recorded spending by currency.",
+      parameters: Type.Object({}, { additionalProperties: false }),
+      execute: async (_input, config, { api, signal }) => {
+        signal?.throwIfAborted();
+        return withWishlist(api, config.persistence?.databasePath, (service) => service.summary());
+      },
+    }),
     tool({
       name: "discover_retailers",
       description:
@@ -924,7 +1123,7 @@ export default definePluginEntry({
   id: "inventorybot",
   name: "InventoryBot",
   description:
-    "Discover retailers, validate adapters, schedule inventory watches, and deliver transition notifications.",
+    "Manage general wishlists, discover retailers, validate adapters, schedule inventory watches, and deliver transition notifications.",
   configSchema: inventoryToolPlugin.configSchema,
   register(api) {
     inventoryToolPlugin.register?.(api);

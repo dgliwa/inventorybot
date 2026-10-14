@@ -1,10 +1,15 @@
 # InventoryBot
 
-InventoryBot is an OpenClaw plugin for safe retailer discovery, deterministic inventory monitoring, adapter candidate generation, durable scheduling, and transition-based notifications.
+InventoryBot is an OpenClaw plugin for general wishlist lifecycle management, safe retailer discovery, deterministic inventory monitoring, adapter candidate generation, durable scheduling, and transition-based notifications.
 
 ## Architecture
 
 ```text
+wishlist
+  idea -> researching -> wanted -> acquired
+  -> optional links, purchases, and watch associations
+  -> no polling or notifications by default
+
 slow loop
   discover stale products
   -> persist retailer candidates
@@ -79,6 +84,29 @@ notifications:
 Discord credentials remain in OpenClaw's Discord channel configuration. InventoryBot submits messages through `sendDurableMessageBatch` and does not store a bot token or call Discord directly. OpenClaw 2026.9.8 or newer is required.
 
 ## Tools
+
+### Wishlist
+
+Wishlist items are general-purpose: books, tools, appliances, collectibles, gifts, or anything else. Their lifecycle is independent from monitoring:
+
+```text
+idea -> researching -> wanted -> acquired
+                   \-> paused
+any state -> archived
+```
+
+An active associated watch adds a derived `watching` state for display; it does not replace the lifecycle state. Creating an item, saving a link, or recording a purchase never creates polling or notifications.
+
+- `inventory_wishlist_add` — create an item, defaulting to `idea`
+- `inventory_wishlist_update` — correct metadata, desired quantity, tags, or priority
+- `inventory_wishlist_transition` — change lifecycle state with retained history
+- `inventory_wishlist_status` — filter or inspect items with links, purchases, history, and monitors
+- `inventory_wishlist_link_add` / `inventory_wishlist_link_remove` — manage non-polling retailer and research links
+- `inventory_wishlist_purchase_add` / `inventory_wishlist_purchase_update` / `inventory_wishlist_purchase_delete` — maintain purchase history and derived acquired quantity
+- `inventory_wishlist_monitor_attach` / `inventory_wishlist_monitor_detach` — associate existing exact or search watches without enabling, disabling, or running them
+- `inventory_wishlist_summary` — aggregate lifecycle, priority, quantities, monitoring, and spending by currency
+
+A broad search watch can be associated with several wishlist items, and an item can use multiple search or exact inventory watches. Existing unassociated watches continue to operate normally.
 
 ### Discovery and adapter pipeline
 
@@ -163,7 +191,7 @@ Search watches monitor a retailer's own search results rather than checking one 
 
 Registration dynamically selects a supported deterministic adapter. It first looks for a public GET search form; retailer-specific detectors can instead validate a public catalog API, such as Costco's GRS JSON search endpoint. The selected endpoint runs twice and must return at least one stable matching product URL before anything is persisted. Scheduled runs call the stored adapter directly and never use a general web-search provider. Unsupported JavaScript-only, authenticated, blocked, off-domain, oversized, or unparseable searches fail safely with no watch creation.
 
-Result URLs are normalized and permanently deduplicated. The first scheduled run notifies for existing matches by default; set `notifyOnInitialResults: false` when a silent baseline is preferred. Changing the retailer or search phrase validates a replacement adapter before resetting the baseline, while changing only cadence preserves result history.
+Result URLs are normalized and deduplicated within retained search-result history. The first scheduled run notifies for existing matches by default; set `notifyOnInitialResults: false` when a silent baseline is preferred. Changing the retailer or search phrase validates a replacement adapter before resetting the baseline, while changing only cadence preserves result history.
 
 ```json
 {
@@ -176,7 +204,7 @@ Result URLs are normalized and permanently deduplicated. The first scheduled run
 
 Set `searchMonitoring.enabled: true` to run search watches without enabling the inventory fast/slow loops. The scheduler checks every minute for search watches whose individual cadence is due. Idle scheduler checks are not persisted as monitor runs.
 
-Each completed search sends at most one Discord message containing all newly discovered results. A previously seen URL is also reported when it disappears for at least one completed search and later reappears. Routine monitor runs, terminal notification records, and search results not seen for more than seven days are pruned; adapter approval and validation audit history is retained.
+Each completed search sends at most one Discord message containing all newly discovered results. A previously seen URL is also reported when it disappears for at least one completed search and later reappears. Routine monitor runs and search results not seen for more than seven days are pruned. Notification delivery history and adapter approval and validation audit history are retained.
 
 ## Fast loop
 
@@ -215,7 +243,7 @@ Expired InventoryBot processing leases remain recoverable before handoff. OpenCl
 
 ## SQLite schema
 
-Schema version 4 contains:
+Schema version 7 contains:
 
 ```text
 products
@@ -230,6 +258,14 @@ adapter_approval_events
 notifications
 monitor_runs
 slow_inspections
+search_watches
+search_watch_results
+wishlist_items
+wishlist_transitions
+wishlist_links
+wishlist_purchases
+wishlist_inventory_watches
+wishlist_search_watches
 ```
 
 SQLite foreign keys and WAL mode are enabled. Database directories and files use restrictive permissions where supported. Monitor status runs `PRAGMA quick_check` and reports schema version, database size, and per-table row counts. Mutating tool calls check cancellation immediately before writes; monitor shutdown aborts and joins active work before its database closes.

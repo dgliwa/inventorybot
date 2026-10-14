@@ -45,6 +45,18 @@ describe("inventorybot plugin", () => {
       },
     } as unknown as OpenClawPluginApi);
     expect(names).toEqual([
+      "inventory_wishlist_add",
+      "inventory_wishlist_update",
+      "inventory_wishlist_transition",
+      "inventory_wishlist_status",
+      "inventory_wishlist_link_add",
+      "inventory_wishlist_link_remove",
+      "inventory_wishlist_purchase_add",
+      "inventory_wishlist_purchase_update",
+      "inventory_wishlist_purchase_delete",
+      "inventory_wishlist_monitor_attach",
+      "inventory_wishlist_monitor_detach",
+      "inventory_wishlist_summary",
       "discover_retailers",
       "check_inventory",
       "inspect_retailer",

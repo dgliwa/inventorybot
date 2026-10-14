@@ -16,7 +16,7 @@ const fixture = `<script type="application/ld+json">{
 }</script>`;
 
 describe("InventoryDatabase persistence", () => {
-  it("migrates a legacy notification table to schema version 6", () => {
+  it("migrates a legacy notification table to schema version 7", () => {
     const directory = mkdtempSync(join(tmpdir(), "inventorybot-migration-"));
     const path = join(directory, "inventorybot.sqlite");
     const legacy = new DatabaseSync(path);
@@ -37,7 +37,7 @@ describe("InventoryDatabase persistence", () => {
 
     const migrated = new InventoryDatabase(path);
     try {
-      expect(migrated.schemaVersion()).toBe(6);
+      expect(migrated.schemaVersion()).toBe(7);
       expect(migrated.notificationStatus()).toEqual({
         pending: 0,
         processing: 0,
@@ -62,7 +62,7 @@ describe("InventoryDatabase persistence", () => {
         retailers: [{ url: "https://shop.example.test/products/42" }],
       });
       expect(database.healthStatus()).toMatchObject({
-        schemaVersion: 6,
+        schemaVersion: 7,
         quickCheck: ["ok"],
         healthy: true,
         tableCounts: {
@@ -114,6 +114,45 @@ describe("InventoryDatabase persistence", () => {
     } finally {
       reopened.close();
       rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves terminal notification delivery history during operational pruning", () => {
+    const database = new InventoryDatabase(":memory:");
+    try {
+      database.enqueueNotification({
+        sourceKind: "test",
+        sourceId: "history",
+        fingerprint: "history-notification",
+        channel: "discord",
+        target: "channel:test",
+        transition: "test",
+        payload: {
+          kind: "test",
+          productName: "History test",
+          currentStatus: "test",
+          checkedAt: "2026-01-01T00:00:00.000Z",
+        },
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      const [claimed] = database.claimNotifications({
+        now: "2026-01-01T00:00:01.000Z",
+        limit: 1,
+        leaseMs: 60_000,
+      });
+      database.markNotificationSent(
+        claimed.id,
+        "discord-message-id",
+        "2026-01-01T00:00:02.000Z",
+      );
+
+      expect(database.pruneOperationalHistory("2026-10-01T00:00:00.000Z")).toEqual({
+        monitorRuns: 0,
+        searchResults: 0,
+      });
+      expect(database.notificationStatus().sent).toBe(1);
+    } finally {
+      database.close();
     }
   });
 

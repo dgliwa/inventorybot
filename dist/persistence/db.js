@@ -1,6 +1,20 @@
 import { chmodSync, lstatSync, mkdirSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+function hydrateWishlistItem(row) {
+    return {
+        id: row.id,
+        name: row.name,
+        ...(row.category ? { category: row.category } : {}),
+        priority: row.priority,
+        status: row.status,
+        desiredQuantity: Number(row.desired_quantity),
+        ...(row.notes ? { notes: row.notes } : {}),
+        tags: JSON.parse(row.tags_json),
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+    };
+}
 function hydrateSearchWatch(row) {
     return {
         id: row.id,
@@ -33,6 +47,12 @@ const INVENTORY_TABLES = [
     "adapter_approval_events",
     "search_watches",
     "search_watch_results",
+    "wishlist_items",
+    "wishlist_transitions",
+    "wishlist_links",
+    "wishlist_purchases",
+    "wishlist_inventory_watches",
+    "wishlist_search_watches",
 ];
 export class InventoryDatabase {
     #database;
@@ -92,8 +112,8 @@ export class InventoryDatabase {
     }
     migrate() {
         const version = this.#database.prepare("PRAGMA user_version").get();
-        if (version.user_version > 6) {
-            throw new Error(`InventoryBot database schema ${version.user_version} is newer than supported schema 5.`);
+        if (version.user_version > 7) {
+            throw new Error(`InventoryBot database schema ${version.user_version} is newer than supported schema 7.`);
         }
         this.#database.exec(`
       CREATE TABLE IF NOT EXISTS products (
@@ -334,6 +354,261 @@ export class InventoryDatabase {
         COMMIT;
       `);
         }
+        if (version.user_version < 7) {
+            this.#database.exec(`
+        BEGIN IMMEDIATE;
+        CREATE TABLE wishlist_items (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          category TEXT,
+          priority TEXT NOT NULL CHECK(priority IN ('low', 'normal', 'high')),
+          status TEXT NOT NULL CHECK(status IN ('idea', 'researching', 'wanted', 'acquired', 'paused', 'archived')),
+          desired_quantity INTEGER NOT NULL CHECK(desired_quantity >= 1),
+          notes TEXT,
+          tags_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX wishlist_items_status_updated ON wishlist_items(status, updated_at DESC);
+        CREATE TABLE wishlist_transitions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          item_id TEXT NOT NULL REFERENCES wishlist_items(id) ON DELETE CASCADE,
+          from_status TEXT,
+          to_status TEXT NOT NULL,
+          reason TEXT,
+          occurred_at TEXT NOT NULL
+        );
+        CREATE INDEX wishlist_transitions_item ON wishlist_transitions(item_id, id DESC);
+        CREATE TABLE wishlist_links (
+          id TEXT PRIMARY KEY,
+          item_id TEXT NOT NULL REFERENCES wishlist_items(id) ON DELETE CASCADE,
+          url TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK(kind IN ('retailer', 'manufacturer', 'review', 'comparison', 'reference', 'other')),
+          label TEXT,
+          price REAL CHECK(price IS NULL OR price >= 0),
+          currency TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(item_id, url)
+        );
+        CREATE INDEX wishlist_links_item ON wishlist_links(item_id, created_at DESC);
+        CREATE TABLE wishlist_purchases (
+          id TEXT PRIMARY KEY,
+          item_id TEXT NOT NULL REFERENCES wishlist_items(id) ON DELETE CASCADE,
+          quantity INTEGER NOT NULL CHECK(quantity >= 1),
+          unit_price REAL CHECK(unit_price IS NULL OR unit_price >= 0),
+          currency TEXT,
+          seller TEXT,
+          purchased_at TEXT NOT NULL,
+          notes TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX wishlist_purchases_item ON wishlist_purchases(item_id, purchased_at DESC);
+        CREATE TABLE wishlist_inventory_watches (
+          item_id TEXT NOT NULL REFERENCES wishlist_items(id) ON DELETE CASCADE,
+          watch_id TEXT NOT NULL REFERENCES inventory_watches(id) ON DELETE CASCADE,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY(item_id, watch_id)
+        );
+        CREATE TABLE wishlist_search_watches (
+          item_id TEXT NOT NULL REFERENCES wishlist_items(id) ON DELETE CASCADE,
+          watch_id TEXT NOT NULL REFERENCES search_watches(id) ON DELETE CASCADE,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY(item_id, watch_id)
+        );
+        PRAGMA user_version = 7;
+        COMMIT;
+      `);
+        }
+    }
+    createWishlistItem(item) {
+        this.#database.exec("BEGIN IMMEDIATE;");
+        try {
+            this.#database.prepare(`
+        INSERT INTO wishlist_items(
+          id, name, category, priority, status, desired_quantity, notes, tags_json,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(item.id, item.name, item.category ?? null, item.priority, item.status, item.desiredQuantity, item.notes ?? null, JSON.stringify(item.tags), item.createdAt, item.updatedAt);
+            this.#database.prepare(`
+        INSERT INTO wishlist_transitions(item_id, from_status, to_status, reason, occurred_at)
+        VALUES (?, NULL, ?, ?, ?)
+      `).run(item.id, item.status, "Item created", item.createdAt);
+            this.#database.exec("COMMIT;");
+        }
+        catch (error) {
+            this.#database.exec("ROLLBACK;");
+            throw error;
+        }
+    }
+    updateWishlistItem(itemId, changes) {
+        const current = this.getWishlistItem(itemId);
+        if (!current)
+            return false;
+        return this.#database.prepare(`
+      UPDATE wishlist_items SET
+        name = ?, category = ?, priority = ?, desired_quantity = ?, notes = ?,
+        tags_json = ?, updated_at = ?
+      WHERE id = ?
+    `).run(changes.name ?? current.name, changes.category === undefined ? current.category ?? null : changes.category, changes.priority ?? current.priority, changes.desiredQuantity ?? current.desiredQuantity, changes.notes === undefined ? current.notes ?? null : changes.notes, JSON.stringify(changes.tags ?? current.tags), changes.updatedAt, itemId).changes > 0;
+    }
+    transitionWishlistItem(input) {
+        this.#database.exec("BEGIN IMMEDIATE;");
+        try {
+            const updated = this.#database.prepare(`
+        UPDATE wishlist_items SET status = ?, updated_at = ? WHERE id = ? AND status = ?
+      `).run(input.toStatus, input.occurredAt, input.itemId, input.fromStatus);
+            if (updated.changes !== 1)
+                throw new Error("Wishlist item status changed concurrently.");
+            this.#database.prepare(`
+        INSERT INTO wishlist_transitions(item_id, from_status, to_status, reason, occurred_at)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(input.itemId, input.fromStatus, input.toStatus, input.reason ?? null, input.occurredAt);
+            this.#database.exec("COMMIT;");
+        }
+        catch (error) {
+            this.#database.exec("ROLLBACK;");
+            throw error;
+        }
+    }
+    getWishlistItem(itemId) {
+        const row = this.#database.prepare(`
+      SELECT id, name, category, priority, status, desired_quantity, notes,
+             tags_json, created_at, updated_at
+      FROM wishlist_items WHERE id = ?
+    `).get(itemId);
+        return row ? hydrateWishlistItem(row) : undefined;
+    }
+    listWishlistItemDetails(filters) {
+        const rows = this.#database.prepare(`
+      SELECT id, name, category, priority, status, desired_quantity, notes,
+             tags_json, created_at, updated_at
+      FROM wishlist_items ORDER BY updated_at DESC, id DESC
+    `).all();
+        const query = filters.query?.toLowerCase();
+        return rows
+            .map(hydrateWishlistItem)
+            .filter((item) => (filters.includeArchived || item.status !== "archived") &&
+            (!filters.status || item.status === filters.status) &&
+            (!filters.priority || item.priority === filters.priority) &&
+            (!filters.category || item.category?.toLowerCase() === filters.category.toLowerCase()) &&
+            (!filters.tag || item.tags.includes(filters.tag)) &&
+            (!query || `${item.name} ${item.category ?? ""} ${item.notes ?? ""} ${item.tags.join(" ")}`.toLowerCase().includes(query)))
+            .slice(0, filters.limit)
+            .map((item) => this.getWishlistItemDetail(item.id));
+    }
+    getWishlistItemDetail(itemId) {
+        const item = this.getWishlistItem(itemId);
+        if (!item)
+            return undefined;
+        const links = this.#database.prepare(`
+      SELECT id, item_id, url, kind, label, price, currency, created_at, updated_at
+      FROM wishlist_links WHERE item_id = ? ORDER BY created_at DESC
+    `).all(itemId);
+        const purchases = this.#database.prepare(`
+      SELECT id, item_id, quantity, unit_price, currency, seller, purchased_at,
+             notes, created_at, updated_at
+      FROM wishlist_purchases WHERE item_id = ? ORDER BY purchased_at DESC, created_at DESC
+    `).all(itemId);
+        const transitions = this.#database.prepare(`
+      SELECT id, item_id, from_status, to_status, reason, occurred_at
+      FROM wishlist_transitions WHERE item_id = ? ORDER BY id DESC
+    `).all(itemId);
+        const inventoryMonitors = this.#database.prepare(`
+      SELECT w.id AS watch_id, w.enabled FROM wishlist_inventory_watches l
+      JOIN inventory_watches w ON w.id = l.watch_id WHERE l.item_id = ?
+    `).all(itemId);
+        const searchMonitors = this.#database.prepare(`
+      SELECT w.id AS watch_id, w.enabled FROM wishlist_search_watches l
+      JOIN search_watches w ON w.id = l.watch_id WHERE l.item_id = ?
+    `).all(itemId);
+        const hydratedPurchases = purchases.map((row) => ({
+            id: row.id, itemId: row.item_id, quantity: Number(row.quantity),
+            ...(row.unit_price !== null ? { unitPrice: Number(row.unit_price) } : {}),
+            ...(row.currency ? { currency: row.currency } : {}),
+            ...(row.seller ? { seller: row.seller } : {}),
+            purchasedAt: row.purchased_at,
+            ...(row.notes ? { notes: row.notes } : {}),
+            createdAt: row.created_at, updatedAt: row.updated_at,
+        }));
+        const monitors = [
+            ...inventoryMonitors.map((row) => ({ kind: "inventory", watchId: row.watch_id, enabled: row.enabled === 1 })),
+            ...searchMonitors.map((row) => ({ kind: "search", watchId: row.watch_id, enabled: row.enabled === 1 })),
+        ];
+        const acquiredQuantity = hydratedPurchases.reduce((sum, purchase) => sum + purchase.quantity, 0);
+        const watching = monitors.some((monitor) => monitor.enabled);
+        return {
+            ...item,
+            acquiredQuantity,
+            remainingQuantity: Math.max(0, item.desiredQuantity - acquiredQuantity),
+            watching,
+            displayState: `${item.status} · ${watching ? "watching" : "no monitoring"}`,
+            links: links.map((row) => ({
+                id: row.id, itemId: row.item_id, url: row.url, kind: row.kind,
+                ...(row.label ? { label: row.label } : {}),
+                ...(row.price !== null ? { price: Number(row.price) } : {}),
+                ...(row.currency ? { currency: row.currency } : {}),
+                createdAt: row.created_at, updatedAt: row.updated_at,
+            })),
+            purchases: hydratedPurchases,
+            transitions: transitions.map((row) => ({
+                id: Number(row.id), itemId: row.item_id,
+                ...(row.from_status ? { fromStatus: row.from_status } : {}),
+                toStatus: row.to_status,
+                ...(row.reason ? { reason: row.reason } : {}),
+                occurredAt: row.occurred_at,
+            })),
+            monitors,
+        };
+    }
+    createWishlistLink(link) {
+        this.#database.prepare(`
+      INSERT INTO wishlist_links(id, item_id, url, kind, label, price, currency, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(link.id, link.itemId, link.url, link.kind, link.label ?? null, link.price ?? null, link.currency ?? null, link.createdAt, link.updatedAt);
+    }
+    removeWishlistLink(itemId, linkId) {
+        return this.#database.prepare("DELETE FROM wishlist_links WHERE id = ? AND item_id = ?")
+            .run(linkId, itemId).changes > 0;
+    }
+    createWishlistPurchase(purchase) {
+        this.#database.prepare(`
+      INSERT INTO wishlist_purchases(
+        id, item_id, quantity, unit_price, currency, seller, purchased_at, notes,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(purchase.id, purchase.itemId, purchase.quantity, purchase.unitPrice ?? null, purchase.currency ?? null, purchase.seller ?? null, purchase.purchasedAt, purchase.notes ?? null, purchase.createdAt, purchase.updatedAt);
+    }
+    getWishlistPurchase(itemId, purchaseId) {
+        return this.getWishlistItemDetail(itemId)?.purchases.find(({ id }) => id === purchaseId);
+    }
+    updateWishlistPurchase(itemId, purchaseId, changes) {
+        const current = this.getWishlistPurchase(itemId, purchaseId);
+        if (!current)
+            return false;
+        return this.#database.prepare(`
+      UPDATE wishlist_purchases SET quantity = ?, unit_price = ?, currency = ?,
+        seller = ?, purchased_at = ?, notes = ?, updated_at = ?
+      WHERE id = ? AND item_id = ?
+    `).run(changes.quantity ?? current.quantity, changes.unitPrice === undefined ? current.unitPrice ?? null : changes.unitPrice, changes.currency === undefined ? current.currency ?? null : changes.currency, changes.seller === undefined ? current.seller ?? null : changes.seller, changes.purchasedAt ?? current.purchasedAt, changes.notes === undefined ? current.notes ?? null : changes.notes, changes.updatedAt, purchaseId, itemId).changes > 0;
+    }
+    removeWishlistPurchase(itemId, purchaseId) {
+        return this.#database.prepare("DELETE FROM wishlist_purchases WHERE id = ? AND item_id = ?")
+            .run(purchaseId, itemId).changes > 0;
+    }
+    attachWishlistMonitor(itemId, kind, watchId, createdAt) {
+        const watch = kind === "inventory" ? this.getWatch(watchId) : this.getSearchWatch(watchId);
+        if (!watch)
+            throw new Error(`Unknown ${kind} watch ID ${watchId}.`);
+        const table = kind === "inventory" ? "wishlist_inventory_watches" : "wishlist_search_watches";
+        this.#database.prepare(`INSERT OR IGNORE INTO ${table}(item_id, watch_id, created_at) VALUES (?, ?, ?)`)
+            .run(itemId, watchId, createdAt);
+    }
+    detachWishlistMonitor(itemId, kind, watchId) {
+        const table = kind === "inventory" ? "wishlist_inventory_watches" : "wishlist_search_watches";
+        return this.#database.prepare(`DELETE FROM ${table} WHERE item_id = ? AND watch_id = ?`)
+            .run(itemId, watchId).changes > 0;
     }
     createWatch(record) {
         this.#database.exec("BEGIN IMMEDIATE;");
@@ -645,16 +920,11 @@ export class InventoryDatabase {
       DELETE FROM monitor_runs
       WHERE completed_at IS NOT NULL AND completed_at < ?
     `).run(cutoff).changes;
-        const notifications = this.#database.prepare(`
-      DELETE FROM notifications
-      WHERE status IN ('sent', 'suppressed', 'failed') AND updated_at < ?
-    `).run(cutoff).changes;
         const searchResults = this.#database.prepare(`
       DELETE FROM search_watch_results WHERE last_seen_at < ?
     `).run(cutoff).changes;
         return {
             monitorRuns: Number(monitorRuns),
-            notifications: Number(notifications),
             searchResults: Number(searchResults),
         };
     }
