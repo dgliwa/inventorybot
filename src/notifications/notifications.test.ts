@@ -271,4 +271,22 @@ describe("formatInventoryNotification", () => {
       checkedAt: "2026-01-01T00:00:00.000Z",
     })).toContain("out_of_stock → in_stock");
   });
+
+  it("formats a search batch as descriptive Discord links", () => {
+    const message = formatInventoryNotification({
+      kind: "search_result",
+      productName: "magic gathering",
+      searchQuery: "magic gathering",
+      retailerDomain: "costco.com",
+      currentStatus: "new_search_results",
+      checkedAt: "2026-01-01T00:00:00.000Z",
+      searchResults: [
+        { title: "Collector Booster", url: "https://costco.com/collector" },
+        { title: "Commander Deck", url: "https://costco.com/commander", reappeared: true },
+      ],
+    });
+    expect(message).toContain("2 new costco.com results");
+    expect(message).toContain("[Collector Booster](https://costco.com/collector)");
+    expect(message).toContain("↩️ Back: [Commander Deck]");
+  });
 });

@@ -16,7 +16,7 @@ export function formatInventoryNotification(payload) {
         ];
         for (const [index, result] of results.entries()) {
             const prefix = result.reappeared ? "↩️ Back: " : "";
-            lines.push(`${index + 1}. ${prefix}[${result.title}](<${result.url}>)`);
+            lines.push(`${index + 1}. ${prefix}[${result.title}](${result.url})`);
             if (result.snippet)
                 lines.push(`   ${result.snippet}`);
         }
