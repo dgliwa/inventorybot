@@ -43,6 +43,7 @@ export type RetailerSearchWatch = {
 export type RetailerSearchWatchResult = SearchResult & {
     firstSeenAt: string;
     lastSeenAt: string;
+    reappeared?: boolean;
 };
 export type SearchWatchRunResult = {
     watchId: string;

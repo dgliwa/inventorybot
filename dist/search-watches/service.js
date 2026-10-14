@@ -148,35 +148,39 @@ export class SearchWatchService {
                 results,
                 checkedAt,
                 nextCheckAt,
+                previousCheckedAt: watch.lastCheckedAt,
             });
         let notificationsRecommended = 0;
-        if (!options.dryRun && options.notification && !suppressInitial) {
-            for (const result of newResults) {
-                const payload = {
-                    kind: "search_result",
-                    watchId: watch.id,
-                    productName: result.title ?? watch.query,
-                    resultTitle: result.title,
-                    resultSnippet: result.snippet,
-                    retailerDomain: watch.domain,
+        if (!options.dryRun && options.notification && !suppressInitial && newResults.length > 0) {
+            const payload = {
+                kind: "search_result",
+                watchId: watch.id,
+                searchWatchId: watch.id,
+                searchQuery: watch.query,
+                productName: watch.query,
+                retailerDomain: watch.domain,
+                currentStatus: "new_search_results",
+                checkedAt,
+                searchResults: newResults.map((result) => ({
+                    title: result.title ?? result.url,
                     url: result.url,
-                    currentStatus: "new_search_result",
-                    checkedAt,
-                };
-                if (this.database.enqueueNotification({
-                    sourceKind: "search_watch",
-                    sourceId: watch.id,
-                    fingerprint: `search:${watch.id}:${result.url}`,
-                    channel: options.notification.channel,
-                    target: options.notification.target,
-                    accountId: options.notification.accountId,
-                    threadId: options.notification.threadId,
-                    transition: "new_search_result",
-                    payload,
-                    createdAt: checkedAt,
-                }))
-                    notificationsRecommended += 1;
-            }
+                    ...(result.snippet ? { snippet: result.snippet } : {}),
+                    ...(result.reappeared ? { reappeared: true } : {}),
+                })),
+            };
+            if (this.database.enqueueNotification({
+                sourceKind: "search_watch",
+                sourceId: watch.id,
+                fingerprint: `search:${watch.id}:${checkedAt}`,
+                channel: options.notification.channel,
+                target: options.notification.target,
+                accountId: options.notification.accountId,
+                threadId: options.notification.threadId,
+                transition: "new_search_results",
+                payload,
+                createdAt: checkedAt,
+            }))
+                notificationsRecommended = 1;
         }
         const searchUrl = watch.adapter.kind === "html_get"
             ? new URL(watch.adapter.searchUrl)

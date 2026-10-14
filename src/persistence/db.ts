@@ -617,10 +617,12 @@ export class InventoryDatabase {
     results: Array<{ url: string; title?: string; snippet?: string }>;
     checkedAt: string;
     nextCheckAt: string;
+    previousCheckedAt?: string;
   }): RetailerSearchWatchResult[] {
-    const existing = this.#database.prepare(
-      "SELECT 1 AS found FROM search_watch_results WHERE watch_id = ? AND url = ?",
-    );
+    const existing = this.#database.prepare(`
+      SELECT first_seen_at, last_seen_at
+      FROM search_watch_results WHERE watch_id = ? AND url = ?
+    `);
     const upsert = this.#database.prepare(`
       INSERT INTO search_watch_results(watch_id, url, title, snippet, first_seen_at, last_seen_at)
       VALUES (?, ?, ?, ?, ?, ?)
@@ -633,7 +635,13 @@ export class InventoryDatabase {
     this.#database.exec("BEGIN IMMEDIATE;");
     try {
       for (const result of input.results) {
-        const isNew = !existing.get(input.watchId, result.url);
+        const prior = existing.get(input.watchId, result.url) as {
+          first_seen_at: string;
+          last_seen_at: string;
+        } | undefined;
+        const reappeared = Boolean(
+          prior && input.previousCheckedAt && prior.last_seen_at < input.previousCheckedAt,
+        );
         upsert.run(
           input.watchId,
           result.url,
@@ -642,11 +650,12 @@ export class InventoryDatabase {
           input.checkedAt,
           input.checkedAt,
         );
-        if (isNew) {
+        if (!prior || reappeared) {
           added.push({
             ...result,
-            firstSeenAt: input.checkedAt,
+            firstSeenAt: prior?.first_seen_at ?? input.checkedAt,
             lastSeenAt: input.checkedAt,
+            ...(reappeared ? { reappeared: true } : {}),
           });
         }
       }
@@ -920,6 +929,29 @@ export class InventoryDatabase {
       if (key in counts) counts[key as keyof typeof counts] = Number(row.count);
     }
     return counts;
+  }
+
+  pruneOperationalHistory(cutoff: string): {
+    monitorRuns: number;
+    notifications: number;
+    searchResults: number;
+  } {
+    const monitorRuns = this.#database.prepare(`
+      DELETE FROM monitor_runs
+      WHERE completed_at IS NOT NULL AND completed_at < ?
+    `).run(cutoff).changes;
+    const notifications = this.#database.prepare(`
+      DELETE FROM notifications
+      WHERE status IN ('sent', 'suppressed', 'failed') AND updated_at < ?
+    `).run(cutoff).changes;
+    const searchResults = this.#database.prepare(`
+      DELETE FROM search_watch_results WHERE last_seen_at < ?
+    `).run(cutoff).changes;
+    return {
+      monitorRuns: Number(monitorRuns),
+      notifications: Number(notifications),
+      searchResults: Number(searchResults),
+    };
   }
 
   startMonitorRun(kind: "fast" | "slow" | "search", startedAt: string): number {

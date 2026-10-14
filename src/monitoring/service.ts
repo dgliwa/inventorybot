@@ -275,7 +275,7 @@ export class InventoryMonitor {
     options.signal?.throwIfAborted();
     const database = this.#databaseFactory();
     const startedAt = this.#now().toISOString();
-    const runId = options.dryRun ? undefined : database.startMonitorRun("search", startedAt);
+    let runId: number | undefined;
     const summary: SearchMonitorSummary = {
       watchesConsidered: 0,
       watchesRun: 0,
@@ -296,6 +296,12 @@ export class InventoryMonitor {
         (!options.dueOnly || !watch.nextCheckAt || Date.parse(watch.nextCheckAt) <= nowMs),
       );
       summary.watchesConsidered = database.listSearchWatches().filter(({ enabled }) => enabled).length;
+      if (!options.dryRun && watches.length > 0) {
+        runId = database.startMonitorRun("search", startedAt);
+        database.pruneOperationalHistory(
+          new Date(this.#now().getTime() - 7 * 24 * 60 * 60_000).toISOString(),
+        );
+      }
       const discord = this.#config.notifications.discord;
       const notification = discord?.enabled && options.deliverNotifications !== false
         ? {

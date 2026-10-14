@@ -16,6 +16,12 @@ export type NotificationPayload = {
   searchQuery?: string;
   resultTitle?: string;
   resultSnippet?: string;
+  searchResults?: Array<{
+    title: string;
+    url: string;
+    snippet?: string;
+    reappeared?: boolean;
+  }>;
 };
 
 export type PendingNotification = {

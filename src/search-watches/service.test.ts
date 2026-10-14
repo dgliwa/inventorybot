@@ -134,4 +134,40 @@ describe("SearchWatchService", () => {
       database.close();
     }
   });
+
+  it("batches new results and reports a result that reappears", async () => {
+    const database = new InventoryDatabase(":memory:");
+    const client = new MutableSearchClient();
+    let now = new Date("2026-01-01T00:00:00.000Z");
+    const service = new SearchWatchService(database, client, () => now);
+    try {
+      const watch = await service.add({ domain: "costco.com", query: "magic gathering" });
+      await service.run(watch.id);
+
+      now = new Date("2026-01-01T01:00:00.000Z");
+      client.results = [
+        { url: "https://costco.com/magic-gathering-box", title: "Magic Gathering Box" },
+        { url: "https://costco.com/magic-gathering-bundle", title: "Magic Gathering Bundle" },
+      ];
+      await expect(service.run(watch.id, {
+        notification: { channel: "discord", target: "channel:123" },
+      })).resolves.toMatchObject({ notificationsRecommended: 1, newResults: [{}, {}] });
+      const [batch] = database.claimNotifications({ now: now.toISOString(), limit: 10, leaseMs: 1_000 });
+      expect(batch?.payload.searchResults).toHaveLength(2);
+
+      now = new Date("2026-01-01T02:00:00.000Z");
+      client.results = [];
+      await service.run(watch.id);
+      now = new Date("2026-01-01T03:00:00.000Z");
+      client.results = [{ url: "https://costco.com/magic-gathering-box", title: "Magic Gathering Box" }];
+      await expect(service.run(watch.id, {
+        notification: { channel: "discord", target: "channel:123" },
+      })).resolves.toMatchObject({
+        notificationsRecommended: 1,
+        newResults: [{ reappeared: true }],
+      });
+    } finally {
+      database.close();
+    }
+  });
 });

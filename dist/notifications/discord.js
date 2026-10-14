@@ -4,16 +4,23 @@ export function formatInventoryNotification(payload) {
         return `🔔 InventoryBot test notification\n\nConfigured delivery is working.\n${payload.checkedAt}`;
     }
     if (payload.kind === "search_result") {
+        const results = payload.searchResults ?? (payload.url ? [{
+                title: payload.resultTitle ?? payload.productName,
+                url: payload.url,
+                snippet: payload.resultSnippet,
+            }] : []);
+        const label = results.length === 1 ? "result" : "results";
         const lines = [
-            `🔎 New ${payload.retailerDomain ?? "retailer"} result for “${payload.searchQuery ?? payload.productName}”`,
+            `🔎 ${results.length} new ${payload.retailerDomain ?? "retailer"} ${label} for “${payload.searchQuery ?? payload.productName}”`,
             "",
-            payload.resultTitle ?? payload.productName,
         ];
-        if (payload.resultSnippet)
-            lines.push("", payload.resultSnippet);
-        lines.push("", `Found: ${payload.checkedAt}`);
-        if (payload.url)
-            lines.push("", payload.url);
+        for (const [index, result] of results.entries()) {
+            const prefix = result.reappeared ? "↩️ Back: " : "";
+            lines.push(`${index + 1}. ${prefix}[${result.title}](<${result.url}>)`);
+            if (result.snippet)
+                lines.push(`   ${result.snippet}`);
+        }
+        lines.push("", `Checked: ${payload.checkedAt}`);
         return lines.join("\n");
     }
     const available = payload.currentStatus === "in_stock";

@@ -174,7 +174,9 @@ Result URLs are normalized and permanently deduplicated. The first scheduled run
 }
 ```
 
-Set `searchMonitoring.enabled: true` to run search watches without enabling the inventory fast/slow loops. The scheduler checks every minute for search watches whose individual cadence is due.
+Set `searchMonitoring.enabled: true` to run search watches without enabling the inventory fast/slow loops. The scheduler checks every minute for search watches whose individual cadence is due. Idle scheduler checks are not persisted as monitor runs.
+
+Each completed search sends at most one Discord message containing all newly discovered results. A previously seen URL is also reported when it disappears for at least one completed search and later reappears. Routine monitor runs, terminal notification records, and search results not seen for more than seven days are pruned; adapter approval and validation audit history is retained.
 
 ## Fast loop
 
@@ -257,7 +259,7 @@ Scheduler, discovery, inspection, and delivery failures emit separate structured
 - Adapter approval and revocation are deliberately manual; there is no automatic promotion policy.
 - Browser and network-traffic inspection are not implemented.
 - Newly discovered retailer candidates require operator review before becoming watch targets.
-- Scheduling is process-local, while run history, observations, pre-handoff outbox work, and leases are durable in InventoryBot SQLite; accepted delivery work is durable in OpenClaw's outbound queue.
+- Scheduling is process-local, while recent run history, observations, pre-handoff outbox work, and leases are durable in InventoryBot SQLite; accepted delivery work is durable in OpenClaw's outbound queue. Routine operational history has a seven-day retention window.
 
 ### Best Buy keyword-search adapter
 

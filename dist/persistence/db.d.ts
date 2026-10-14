@@ -83,6 +83,7 @@ export declare class InventoryDatabase {
         }>;
         checkedAt: string;
         nextCheckAt: string;
+        previousCheckedAt?: string;
     }): RetailerSearchWatchResult[];
     enqueueNotification(input: {
         sourceKind: string;
@@ -144,6 +145,11 @@ export declare class InventoryDatabase {
         sent: number;
         suppressed: number;
         failed: number;
+    };
+    pruneOperationalHistory(cutoff: string): {
+        monitorRuns: number;
+        notifications: number;
+        searchResults: number;
     };
     startMonitorRun(kind: "fast" | "slow" | "search", startedAt: string): number;
     completeMonitorRun(id: number, input: {
