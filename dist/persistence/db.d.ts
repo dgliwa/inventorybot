@@ -4,6 +4,7 @@ import type { RetailerCandidate } from "../discovery/types.js";
 import type { AdapterCandidate, AdapterValidationReport } from "../generation/types.js";
 import type { RetailerInspection } from "../inspection/types.js";
 import type { NotificationPayload, PendingNotification } from "../notifications/types.js";
+import type { ResearchCandidate, ResearchPromotion, ResearchRun, ResearchTopic, ResearchTopicStatus } from "../research/types.js";
 import type { DeterministicSearchAdapter, RetailerSearchWatch, RetailerSearchWatchResult } from "../search-watches/types.js";
 import type { InventoryWatch } from "../watches/types.js";
 import type { WishlistItem, WishlistItemDetail, WishlistLink, WishlistPriority, WishlistPurchase, WishlistStatus } from "../wishlist/types.js";
@@ -235,5 +236,38 @@ export declare class InventoryDatabase {
         revokedAt: string;
         reason?: string;
     }): void;
+    createResearchTopic(topic: ResearchTopic): void;
+    updateResearchTopic(topicId: string, changes: {
+        name?: string;
+        query?: string;
+        category?: string | null;
+        notes?: string | null;
+        status?: ResearchTopicStatus;
+        refreshIntervalDays?: number;
+        minimumSellerRating?: number;
+        allowMarketplaceSellers?: boolean;
+        nextRefreshAt?: string;
+        updatedAt: string;
+    }): boolean;
+    getResearchTopic(topicId: string): ResearchTopic | undefined;
+    listResearchTopics(options: {
+        status?: ResearchTopicStatus;
+        dueBefore?: string;
+        query?: string;
+        limit: number;
+    }): ResearchTopic[];
+    listDueResearchTopics(dueBefore: string, limit: number): ResearchTopic[];
+    createResearchRun(input: {
+        run: ResearchRun;
+        updatedAt: string;
+    }): void;
+    getLatestResearchRun(topicId: string): ResearchRun | undefined;
+    getResearchCandidate(topicId: string, candidateId: string): ResearchCandidate | undefined;
+    countResearchRuns(topicId: string): number;
+    createResearchPromotion(promotion: ResearchPromotion): void;
+    listResearchPromotions(topicId: string): ResearchPromotion[];
+    private listResearchCandidates;
+    private hydrateResearchCandidate;
+    private hydrateResearchTopic;
     private hydrateWatch;
 }

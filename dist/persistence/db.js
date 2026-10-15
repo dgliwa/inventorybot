@@ -53,6 +53,10 @@ const INVENTORY_TABLES = [
     "wishlist_purchases",
     "wishlist_inventory_watches",
     "wishlist_search_watches",
+    "research_topics",
+    "research_runs",
+    "research_candidates",
+    "research_promotions",
 ];
 export class InventoryDatabase {
     #database;
@@ -112,8 +116,8 @@ export class InventoryDatabase {
     }
     migrate() {
         const version = this.#database.prepare("PRAGMA user_version").get();
-        if (version.user_version > 7) {
-            throw new Error(`InventoryBot database schema ${version.user_version} is newer than supported schema 7.`);
+        if (version.user_version > 8) {
+            throw new Error(`InventoryBot database schema ${version.user_version} is newer than supported schema 8.`);
         }
         this.#database.exec(`
       CREATE TABLE IF NOT EXISTS products (
@@ -418,6 +422,68 @@ export class InventoryDatabase {
           PRIMARY KEY(item_id, watch_id)
         );
         PRAGMA user_version = 7;
+        COMMIT;
+      `);
+        }
+        if (version.user_version < 8) {
+            this.#database.exec(`
+        BEGIN IMMEDIATE;
+        CREATE TABLE research_topics (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          query TEXT NOT NULL,
+          category TEXT,
+          notes TEXT,
+          status TEXT NOT NULL CHECK(status IN ('active', 'paused', 'archived')),
+          refresh_interval_days INTEGER NOT NULL CHECK(refresh_interval_days >= 1),
+          minimum_seller_rating REAL NOT NULL CHECK(minimum_seller_rating >= 0 AND minimum_seller_rating <= 5),
+          allow_marketplace_sellers INTEGER NOT NULL CHECK(allow_marketplace_sellers IN (0, 1)),
+          last_completed_at TEXT,
+          next_refresh_at TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX research_topics_due ON research_topics(status, next_refresh_at);
+        CREATE TABLE research_runs (
+          id TEXT PRIMARY KEY,
+          topic_id TEXT NOT NULL REFERENCES research_topics(id) ON DELETE CASCADE,
+          summary TEXT NOT NULL,
+          recommended_candidate_id TEXT NOT NULL,
+          recommendation_changed INTEGER NOT NULL CHECK(recommendation_changed IN (0, 1)),
+          researched_at TEXT NOT NULL,
+          next_refresh_at TEXT NOT NULL
+        );
+        CREATE INDEX research_runs_topic ON research_runs(topic_id, researched_at DESC, id DESC);
+        CREATE TABLE research_candidates (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL REFERENCES research_runs(id) ON DELETE CASCADE,
+          url TEXT NOT NULL,
+          title TEXT NOT NULL,
+          brand TEXT,
+          seller TEXT,
+          seller_type TEXT NOT NULL CHECK(seller_type IN ('manufacturer', 'household_retailer', 'boutique', 'marketplace', 'unknown')),
+          seller_rating REAL CHECK(seller_rating IS NULL OR (seller_rating >= 0 AND seller_rating <= 5)),
+          review_count INTEGER CHECK(review_count IS NULL OR review_count >= 0),
+          price REAL CHECK(price IS NULL OR price >= 0),
+          currency TEXT,
+          verdict TEXT NOT NULL CHECK(verdict IN ('recommended', 'alternative', 'rejected')),
+          rationale TEXT NOT NULL,
+          evidence_json TEXT NOT NULL,
+          UNIQUE(run_id, url)
+        );
+        CREATE INDEX research_candidates_run ON research_candidates(run_id, verdict, id);
+        CREATE TABLE research_promotions (
+          id TEXT PRIMARY KEY,
+          topic_id TEXT NOT NULL REFERENCES research_topics(id) ON DELETE CASCADE,
+          candidate_id TEXT NOT NULL REFERENCES research_candidates(id) ON DELETE RESTRICT,
+          wishlist_item_id TEXT NOT NULL REFERENCES wishlist_items(id) ON DELETE CASCADE,
+          continue_research INTEGER NOT NULL CHECK(continue_research IN (0, 1)),
+          promoted_at TEXT NOT NULL,
+          UNIQUE(topic_id, candidate_id, wishlist_item_id)
+        );
+        CREATE INDEX research_promotions_topic ON research_promotions(topic_id, promoted_at DESC);
+        CREATE INDEX research_promotions_wishlist ON research_promotions(wishlist_item_id, promoted_at DESC);
+        PRAGMA user_version = 8;
         COMMIT;
       `);
         }
@@ -1182,6 +1248,186 @@ export class InventoryDatabase {
             this.#database.exec("ROLLBACK;");
             throw error;
         }
+    }
+    createResearchTopic(topic) {
+        this.#database.prepare(`
+      INSERT INTO research_topics(
+        id, name, query, category, notes, status, refresh_interval_days,
+        minimum_seller_rating, allow_marketplace_sellers, last_completed_at,
+        next_refresh_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(topic.id, topic.name, topic.query, topic.category ?? null, topic.notes ?? null, topic.status, topic.refreshIntervalDays, topic.minimumSellerRating, topic.allowMarketplaceSellers ? 1 : 0, topic.lastCompletedAt ?? null, topic.nextRefreshAt, topic.createdAt, topic.updatedAt);
+    }
+    updateResearchTopic(topicId, changes) {
+        const current = this.getResearchTopic(topicId);
+        if (!current)
+            return false;
+        return this.#database.prepare(`
+      UPDATE research_topics SET
+        name = ?, query = ?, category = ?, notes = ?, status = ?,
+        refresh_interval_days = ?, minimum_seller_rating = ?,
+        allow_marketplace_sellers = ?, next_refresh_at = ?, updated_at = ?
+      WHERE id = ?
+    `).run(changes.name ?? current.name, changes.query ?? current.query, changes.category === undefined ? current.category ?? null : changes.category, changes.notes === undefined ? current.notes ?? null : changes.notes, changes.status ?? current.status, changes.refreshIntervalDays ?? current.refreshIntervalDays, changes.minimumSellerRating ?? current.minimumSellerRating, (changes.allowMarketplaceSellers ?? current.allowMarketplaceSellers) ? 1 : 0, changes.nextRefreshAt ?? current.nextRefreshAt, changes.updatedAt, topicId).changes > 0;
+    }
+    getResearchTopic(topicId) {
+        const row = this.#database.prepare(`
+      SELECT id, name, query, category, notes, status, refresh_interval_days,
+        minimum_seller_rating, allow_marketplace_sellers, last_completed_at,
+        next_refresh_at, created_at, updated_at
+      FROM research_topics WHERE id = ?
+    `).get(topicId);
+        return row ? this.hydrateResearchTopic(row) : undefined;
+    }
+    listResearchTopics(options) {
+        const rows = this.#database.prepare(`
+      SELECT id, name, query, category, notes, status, refresh_interval_days,
+        minimum_seller_rating, allow_marketplace_sellers, last_completed_at,
+        next_refresh_at, created_at, updated_at
+      FROM research_topics
+      WHERE (? IS NULL OR status = ?)
+        AND (? IS NULL OR next_refresh_at <= ?)
+      ORDER BY next_refresh_at ASC, id ASC
+    `).all(options.status ?? null, options.status ?? null, options.dueBefore ?? null, options.dueBefore ?? null);
+        const query = options.query?.toLowerCase();
+        return rows
+            .map((row) => this.hydrateResearchTopic(row))
+            .filter((topic) => !query || `${topic.name} ${topic.query} ${topic.category ?? ""} ${topic.notes ?? ""}`.toLowerCase().includes(query))
+            .slice(0, options.limit);
+    }
+    listDueResearchTopics(dueBefore, limit) {
+        return this.listResearchTopics({ status: "active", dueBefore, limit });
+    }
+    createResearchRun(input) {
+        this.#database.exec("BEGIN IMMEDIATE;");
+        try {
+            this.#database.prepare(`
+        INSERT INTO research_runs(
+          id, topic_id, summary, recommended_candidate_id,
+          recommendation_changed, researched_at, next_refresh_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(input.run.id, input.run.topicId, input.run.summary, input.run.recommendedCandidateId, input.run.recommendationChanged ? 1 : 0, input.run.researchedAt, input.run.nextRefreshAt);
+            const insertCandidate = this.#database.prepare(`
+        INSERT INTO research_candidates(
+          id, run_id, url, title, brand, seller, seller_type, seller_rating,
+          review_count, price, currency, verdict, rationale, evidence_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+            for (const candidate of input.run.candidates) {
+                insertCandidate.run(candidate.id, input.run.id, candidate.url, candidate.title, candidate.brand ?? null, candidate.seller ?? null, candidate.sellerType, candidate.sellerRating ?? null, candidate.reviewCount ?? null, candidate.price ?? null, candidate.currency ?? null, candidate.verdict, candidate.rationale, JSON.stringify(candidate.evidence));
+            }
+            this.#database.prepare(`
+        UPDATE research_topics
+        SET last_completed_at = ?, next_refresh_at = ?, updated_at = ?
+        WHERE id = ?
+      `).run(input.run.researchedAt, input.run.nextRefreshAt, input.updatedAt, input.run.topicId);
+            this.#database.exec("COMMIT;");
+        }
+        catch (error) {
+            this.#database.exec("ROLLBACK;");
+            throw error;
+        }
+    }
+    getLatestResearchRun(topicId) {
+        const row = this.#database.prepare(`
+      SELECT id, topic_id, summary, recommended_candidate_id,
+        recommendation_changed, researched_at, next_refresh_at
+      FROM research_runs WHERE topic_id = ?
+      ORDER BY researched_at DESC, rowid DESC LIMIT 1
+    `).get(topicId);
+        if (!row)
+            return undefined;
+        return {
+            id: row.id,
+            topicId: row.topic_id,
+            summary: row.summary,
+            recommendedCandidateId: row.recommended_candidate_id,
+            recommendationChanged: row.recommendation_changed === 1,
+            researchedAt: row.researched_at,
+            nextRefreshAt: row.next_refresh_at,
+            candidates: this.listResearchCandidates(row.id),
+        };
+    }
+    getResearchCandidate(topicId, candidateId) {
+        const row = this.#database.prepare(`
+      SELECT c.id, c.run_id, c.url, c.title, c.brand, c.seller, c.seller_type,
+        c.seller_rating, c.review_count, c.price, c.currency, c.verdict,
+        c.rationale, c.evidence_json
+      FROM research_candidates c
+      JOIN research_runs r ON r.id = c.run_id
+      WHERE r.topic_id = ? AND c.id = ?
+    `).get(topicId, candidateId);
+        return row ? this.hydrateResearchCandidate(row) : undefined;
+    }
+    countResearchRuns(topicId) {
+        const row = this.#database.prepare(`
+      SELECT COUNT(*) AS count FROM research_runs WHERE topic_id = ?
+    `).get(topicId);
+        return Number(row.count);
+    }
+    createResearchPromotion(promotion) {
+        this.#database.prepare(`
+      INSERT INTO research_promotions(
+        id, topic_id, candidate_id, wishlist_item_id, continue_research, promoted_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `).run(promotion.id, promotion.topicId, promotion.candidateId, promotion.wishlistItemId, promotion.continueResearch ? 1 : 0, promotion.promotedAt);
+    }
+    listResearchPromotions(topicId) {
+        const rows = this.#database.prepare(`
+      SELECT id, topic_id, candidate_id, wishlist_item_id, continue_research, promoted_at
+      FROM research_promotions WHERE topic_id = ? ORDER BY promoted_at DESC, id DESC
+    `).all(topicId);
+        return rows.map((row) => ({
+            id: row.id,
+            topicId: row.topic_id,
+            candidateId: row.candidate_id,
+            wishlistItemId: row.wishlist_item_id,
+            continueResearch: row.continue_research === 1,
+            promotedAt: row.promoted_at,
+        }));
+    }
+    listResearchCandidates(runId) {
+        const rows = this.#database.prepare(`
+      SELECT id, run_id, url, title, brand, seller, seller_type, seller_rating,
+        review_count, price, currency, verdict, rationale, evidence_json
+      FROM research_candidates WHERE run_id = ? ORDER BY id ASC
+    `).all(runId);
+        return rows.map((row) => this.hydrateResearchCandidate(row));
+    }
+    hydrateResearchCandidate(row) {
+        return {
+            id: row.id,
+            runId: row.run_id,
+            url: row.url,
+            title: row.title,
+            ...(row.brand ? { brand: row.brand } : {}),
+            ...(row.seller ? { seller: row.seller } : {}),
+            sellerType: row.seller_type,
+            ...(row.seller_rating !== null ? { sellerRating: Number(row.seller_rating) } : {}),
+            ...(row.review_count !== null ? { reviewCount: Number(row.review_count) } : {}),
+            ...(row.price !== null ? { price: Number(row.price) } : {}),
+            ...(row.currency ? { currency: row.currency } : {}),
+            verdict: row.verdict,
+            rationale: row.rationale,
+            evidence: JSON.parse(row.evidence_json),
+        };
+    }
+    hydrateResearchTopic(row) {
+        return {
+            id: row.id,
+            name: row.name,
+            query: row.query,
+            ...(row.category ? { category: row.category } : {}),
+            ...(row.notes ? { notes: row.notes } : {}),
+            status: row.status,
+            refreshIntervalDays: Number(row.refresh_interval_days),
+            minimumSellerRating: Number(row.minimum_seller_rating),
+            allowMarketplaceSellers: row.allow_marketplace_sellers === 1,
+            ...(row.last_completed_at ? { lastCompletedAt: row.last_completed_at } : {}),
+            nextRefreshAt: row.next_refresh_at,
+            createdAt: row.created_at,
+            updatedAt: row.updated_at,
+        };
     }
     hydrateWatch(row) {
         const targetRows = this.#database.prepare(`

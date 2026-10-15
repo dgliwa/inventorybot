@@ -1,10 +1,15 @@
 # InventoryBot
 
-InventoryBot is an OpenClaw plugin for general wishlist lifecycle management, safe retailer discovery, deterministic inventory monitoring, adapter candidate generation, durable scheduling, and transition-based notifications.
+InventoryBot is an OpenClaw plugin for research-to-wishlist pipelines, general wishlist lifecycle management, safe retailer discovery, deterministic inventory monitoring, adapter candidate generation, durable scheduling, and transition-based notifications.
 
 ## Architecture
 
 ```text
+research topic
+  current multi-source research -> evidence-backed candidates
+  -> promote selected listing into a new or existing wishlist item
+  -> independently continue, pause, or archive future discovery
+
 wishlist
   idea -> researching -> wanted -> acquired
   -> optional links, purchases, and watch associations
@@ -107,6 +112,32 @@ An active associated watch adds a derived `watching` state for display; it does 
 - `inventory_wishlist_summary` — aggregate lifecycle, priority, quantities, monitoring, and spending by currency
 
 A broad search watch can be associated with several wishlist items, and an item can use multiple search or exact inventory watches. Existing unassociated watches continue to operate normally.
+
+### Research pipeline
+
+Research topics are durable ideas that exist independently from the wishlist. A topic retains current and historical recommendations, supporting evidence, rejected candidates, seller-quality data, and every promotion into the wishlist.
+
+```text
+research topic -> recurring research runs -> candidates
+               -> promote selected candidate -> wishlist item
+               -> continue or pause discovery independently
+```
+
+This separation allows a selected exact listing to remain authoritative while the originating idea continues discovering future examples. Later research never silently replaces a promoted wishlist selection.
+
+- `inventory_research_topic_add` — create an independent research idea with a refresh cadence and seller-quality policy
+- `inventory_research_topic_update` — correct, pause, resume, or archive a topic without deleting history
+- `inventory_research_status` — inspect the research pipeline, latest recommendation, evidence, and promotions
+- `inventory_research_due` — list active topics due for initial or recurring research
+- `inventory_research_search` — perform current multi-angle searches across manufacturers, established retailers, boutiques, and independent reviews
+- `inventory_research_record` — persist one evidence-backed snapshot with one current recommendation
+- `inventory_research_promote` — turn a candidate into a new or existing wishlist item and choose whether discovery continues
+
+Recommendation and alternative candidates default to manufacturers, household-name retailers, and reputable boutiques. Generic marketplace or unknown sellers are excluded unless explicitly allowed, and configured seller-rating minimums are enforced when ratings are available. Rejected candidates can still be retained as evidence explaining why they were excluded.
+
+When Derek supplies an exact listing without asking for alternatives, it should go directly into the wishlist rather than creating a broad research topic. A research topic should be created only when broader or continuing discovery is wanted.
+
+The plugin stores due dates, but research execution uses OpenClaw's web-search runtime and agent orchestration. A scheduled OpenClaw automation can call `inventory_research_due`, search each due topic, and record completed snapshots.
 
 ### Discovery and adapter pipeline
 
@@ -243,7 +274,7 @@ Expired InventoryBot processing leases remain recoverable before handoff. OpenCl
 
 ## SQLite schema
 
-Schema version 7 contains:
+Schema version 8 contains:
 
 ```text
 products
@@ -266,6 +297,10 @@ wishlist_links
 wishlist_purchases
 wishlist_inventory_watches
 wishlist_search_watches
+research_topics
+research_runs
+research_candidates
+research_promotions
 ```
 
 SQLite foreign keys and WAL mode are enabled. Database directories and files use restrictive permissions where supported. Monitor status runs `PRAGMA quick_check` and reports schema version, database size, and per-table row counts. Mutating tool calls check cancellation immediately before writes; monitor shutdown aborts and joins active work before its database closes.
@@ -295,6 +330,7 @@ Scheduler, discovery, inspection, and delivery failures emit separate structured
 - Adapter approval and revocation are deliberately manual; there is no automatic promotion policy.
 - Browser and network-traffic inspection are not implemented.
 - Newly discovered retailer candidates require operator review before becoming watch targets.
+- Recurring research due dates are durable, but an OpenClaw agent or automation must execute web research and record the result; the deterministic monitor never invents recommendations.
 - Scheduling is process-local, while recent run history, observations, pre-handoff outbox work, and leases are durable in InventoryBot SQLite; accepted delivery work is durable in OpenClaw's outbound queue. Routine operational history has a seven-day retention window.
 
 ### Best Buy keyword-search adapter
