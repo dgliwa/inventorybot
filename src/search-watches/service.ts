@@ -182,13 +182,23 @@ export class SearchWatchService {
     const suppressInitial = baselineEstablished && !watch.notifyOnInitialResults;
     const results = [...unique.values()];
     const newResults: RetailerSearchWatchResult[] = options.dryRun
-      ? results.map((result) => ({ ...result, firstSeenAt: checkedAt, lastSeenAt: checkedAt }))
+      ? results.map((result) => ({
+          ...result,
+          firstSeenAt: checkedAt,
+          lastSeenAt: checkedAt,
+          present: true,
+          consecutiveMisses: 0,
+          listingKind: "catalog_listing",
+          availability: "not_checked",
+        }))
       : this.database.recordSearchWatchResults({
           watchId: watch.id,
           results,
           checkedAt,
           nextCheckAt,
-          previousCheckedAt: watch.lastCheckedAt,
+          absenceThreshold: 3,
+          notificationCooldownHours: 24,
+          markNotifications: !suppressInitial && Boolean(options.notification),
         });
     let notificationsRecommended = 0;
     if (!options.dryRun && options.notification && !suppressInitial && newResults.length > 0) {
@@ -199,11 +209,13 @@ export class SearchWatchService {
         searchQuery: watch.query,
         productName: watch.query,
         retailerDomain: watch.domain,
-        currentStatus: "new_search_results",
+        currentStatus: "catalog_listings_discovered",
         checkedAt,
         searchResults: newResults.map((result) => ({
           title: result.title ?? result.url,
           url: result.url,
+          listingKind: result.listingKind,
+          availability: result.availability,
           ...(result.snippet ? { snippet: result.snippet } : {}),
           ...(result.reappeared ? { reappeared: true } : {}),
         })),
@@ -216,7 +228,7 @@ export class SearchWatchService {
         target: options.notification.target,
         accountId: options.notification.accountId,
         threadId: options.notification.threadId,
-        transition: "new_search_results",
+        transition: "catalog_listings_discovered",
         payload,
         createdAt: checkedAt,
       })) notificationsRecommended = 1;

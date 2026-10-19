@@ -285,8 +285,9 @@ describe("formatInventoryNotification", () => {
         { title: "Commander Deck", url: "https://costco.com/commander", reappeared: true },
       ],
     });
-    expect(message).toContain("2 new costco.com results");
+    expect(message).toContain("2 costco.com catalog listings");
     expect(message).toContain("[Collector Booster](https://costco.com/collector)");
-    expect(message).toContain("↩️ Back: [Commander Deck]");
+    expect(message).toContain("Listing discovery only — availability and stock were not checked.");
+    expect(message).toContain("↩️ Listing returned after confirmed absence: [Commander Deck]");
   });
 });

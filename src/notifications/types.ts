@@ -20,6 +20,8 @@ export type NotificationPayload = {
     title: string;
     url: string;
     snippet?: string;
+    listingKind?: "catalog_listing";
+    availability?: "not_checked";
     reappeared?: boolean;
   }>;
 };

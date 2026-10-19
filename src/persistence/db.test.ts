@@ -37,7 +37,7 @@ describe("InventoryDatabase persistence", () => {
 
     const migrated = new InventoryDatabase(path);
     try {
-      expect(migrated.schemaVersion()).toBe(8);
+      expect(migrated.schemaVersion()).toBe(9);
       expect(migrated.notificationStatus()).toEqual({
         pending: 0,
         processing: 0,
@@ -62,7 +62,7 @@ describe("InventoryDatabase persistence", () => {
         retailers: [{ url: "https://shop.example.test/products/42" }],
       });
       expect(database.healthStatus()).toMatchObject({
-        schemaVersion: 8,
+        schemaVersion: 9,
         quickCheck: ["ok"],
         healthy: true,
         tableCounts: {

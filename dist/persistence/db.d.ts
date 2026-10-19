@@ -129,7 +129,9 @@ export declare class InventoryDatabase {
         }>;
         checkedAt: string;
         nextCheckAt: string;
-        previousCheckedAt?: string;
+        absenceThreshold?: number;
+        notificationCooldownHours?: number;
+        markNotifications?: boolean;
     }): RetailerSearchWatchResult[];
     enqueueNotification(input: {
         sourceKind: string;
