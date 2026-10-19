@@ -155,10 +155,12 @@ describe("SearchWatchService", () => {
       const [batch] = database.claimNotifications({ now: now.toISOString(), limit: 10, leaseMs: 1_000 });
       expect(batch?.payload.searchResults).toHaveLength(2);
 
-      now = new Date("2026-01-01T02:00:00.000Z");
       client.results = [];
-      await service.run(watch.id);
-      now = new Date("2026-01-01T03:00:00.000Z");
+      for (const hour of [2, 3, 4]) {
+        now = new Date(`2026-01-01T${String(hour).padStart(2, "0")}:00:00.000Z`);
+        await service.run(watch.id);
+      }
+      now = new Date("2026-01-02T02:00:00.000Z");
       client.results = [{ url: "https://costco.com/magic-gathering-box", title: "Magic Gathering Box" }];
       await expect(service.run(watch.id, {
         notification: { channel: "discord", target: "channel:123" },

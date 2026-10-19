@@ -25,12 +25,6 @@ import { SearchWatchService } from "./search-watches/service.js";
 import type { NotificationChannel } from "./notifications/types.js";
 import { InventoryDatabase } from "./persistence/db.js";
 import { resolveInventoryDatabasePath } from "./persistence/path.js";
-import { ResearchService } from "./research/service.js";
-import {
-  RESEARCH_SELLER_TYPES,
-  RESEARCH_TOPIC_STATUSES,
-  RESEARCH_VERDICTS,
-} from "./research/types.js";
 import { checkInventory } from "./tools/check-inventory.js";
 import { WatchService } from "./watches/service.js";
 import { WishlistService } from "./wishlist/service.js";
@@ -59,19 +53,6 @@ function withWishlist<T>(
   const database = openInventoryDatabase(api, configuredPath);
   try {
     return operation(new WishlistService(database));
-  } finally {
-    database.close();
-  }
-}
-
-function withResearch<T>(
-  api: StateRuntimeApi,
-  configuredPath: string | undefined,
-  operation: (service: ResearchService) => T,
-): T {
-  const database = openInventoryDatabase(api, configuredPath);
-  try {
-    return operation(new ResearchService(database));
   } finally {
     database.close();
   }
@@ -152,11 +133,7 @@ const inventoryMethodSchema = Type.Union([
 const wishlistStatusSchema = Type.Union(WISHLIST_STATUSES.map((value) => Type.Literal(value)));
 const wishlistPrioritySchema = Type.Union(WISHLIST_PRIORITIES.map((value) => Type.Literal(value)));
 const wishlistLinkKindSchema = Type.Union(WISHLIST_LINK_KINDS.map((value) => Type.Literal(value)));
-const researchTopicStatusSchema = Type.Union(RESEARCH_TOPIC_STATUSES.map((value) => Type.Literal(value)));
-const researchSellerTypeSchema = Type.Union(RESEARCH_SELLER_TYPES.map((value) => Type.Literal(value)));
-const researchVerdictSchema = Type.Union(RESEARCH_VERDICTS.map((value) => Type.Literal(value)));
 const wishlistIdSchema = Type.String({ minLength: 1, description: "Wishlist item ID." });
-const researchTopicIdSchema = Type.String({ minLength: 1, description: "Research topic ID." });
 const nullableTextSchema = Type.Union([Type.String({ minLength: 1 }), Type.Null()]);
 const nullableMoneySchema = Type.Union([Type.Number({ minimum: 0 }), Type.Null()]);
 
@@ -477,157 +454,6 @@ const inventoryToolPlugin = defineToolPlugin({
       execute: async (_input, config, { api, signal }) => {
         signal?.throwIfAborted();
         return withWishlist(api, config.persistence?.databasePath, (service) => service.summary());
-      },
-    }),
-    tool({
-      name: "inventory_research_topic_add",
-      description: "Create a durable research idea independently of the wishlist. Use this for broad product exploration, not when Derek has supplied only an exact listing with no request for alternatives.",
-      parameters: Type.Object({
-        name: Type.String({ minLength: 1, maxLength: 500 }),
-        query: Type.Optional(Type.String({ minLength: 1, maxLength: 2_000 })),
-        category: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
-        notes: Type.Optional(Type.String({ minLength: 1, maxLength: 10_000 })),
-        status: Type.Optional(researchTopicStatusSchema),
-        refreshIntervalDays: Type.Optional(Type.Integer({ minimum: 1, maximum: 3_650, default: 30 })),
-        minimumSellerRating: Type.Optional(Type.Number({ minimum: 0, maximum: 5, default: 4 })),
-        allowMarketplaceSellers: Type.Optional(Type.Boolean({ default: false })),
-      }, { additionalProperties: false }),
-      execute: async (input, config, { api, signal }) => {
-        signal?.throwIfAborted();
-        return withResearch(api, config.persistence?.databasePath, (service) => service.add(input));
-      },
-    }),
-    tool({
-      name: "inventory_research_topic_update",
-      description: "Correct, pause, resume, or archive a research idea without deleting its runs, candidates, or wishlist promotions. Null clears category or notes.",
-      parameters: Type.Object({
-        topicId: researchTopicIdSchema,
-        name: Type.Optional(Type.String({ minLength: 1, maxLength: 500 })),
-        query: Type.Optional(Type.String({ minLength: 1, maxLength: 2_000 })),
-        category: Type.Optional(nullableTextSchema),
-        notes: Type.Optional(nullableTextSchema),
-        status: Type.Optional(researchTopicStatusSchema),
-        refreshIntervalDays: Type.Optional(Type.Integer({ minimum: 1, maximum: 3_650 })),
-        minimumSellerRating: Type.Optional(Type.Number({ minimum: 0, maximum: 5 })),
-        allowMarketplaceSellers: Type.Optional(Type.Boolean()),
-      }, { additionalProperties: false }),
-      execute: async ({ topicId, ...input }, config, { api, signal }) => {
-        signal?.throwIfAborted();
-        return withResearch(api, config.persistence?.databasePath, (service) => service.update(topicId, input));
-      },
-    }),
-    tool({
-      name: "inventory_research_status",
-      description: "Read one research idea or list the research pipeline with current recommendation, evidence, promotion history, due state, and refresh policy.",
-      parameters: Type.Object({
-        topicId: Type.Optional(researchTopicIdSchema),
-        status: Type.Optional(researchTopicStatusSchema),
-        dueOnly: Type.Optional(Type.Boolean({ default: false })),
-        query: Type.Optional(Type.String({ minLength: 1 })),
-        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, default: 50 })),
-      }, { additionalProperties: false }),
-      execute: async ({ topicId, ...options }, config, { api, signal }) => {
-        signal?.throwIfAborted();
-        return withResearch(api, config.persistence?.databasePath, (service) => topicId
-          ? service.status(topicId)
-          : { research: service.list(options) });
-      },
-    }),
-    tool({
-      name: "inventory_research_due",
-      description: "List active research ideas due for an initial or recurring refresh. Paused and archived ideas remain preserved but are not returned.",
-      parameters: Type.Object({
-        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, default: 20 })),
-      }, { additionalProperties: false }),
-      execute: async ({ limit }, config, { api, signal }) => {
-        signal?.throwIfAborted();
-        return withResearch(api, config.persistence?.databasePath, (service) => ({ due: service.due(limit) }));
-      },
-    }),
-    tool({
-      name: "inventory_research_search",
-      description: "Run current multi-angle web searches for a research idea. Results are evidence candidates only and never alter an existing wishlist selection.",
-      parameters: Type.Object({
-        topicId: researchTopicIdSchema,
-        resultsPerQuery: Type.Optional(Type.Integer({ minimum: 1, maximum: 20, default: 8 })),
-      }, { additionalProperties: false }),
-      execute: async ({ topicId, resultsPerQuery }, config, { api, signal }) => {
-        signal?.throwIfAborted();
-        const research = withResearch(api, config.persistence?.databasePath, (service) => service.status(topicId));
-        const year = new Date().getUTCFullYear();
-        const queries = [
-          `${research.topic.query} best options ${year} reputable retailers`,
-          `${research.topic.query} official manufacturer products`,
-          `${research.topic.query} specialty boutique retailer`,
-          `${research.topic.query} independent comparison reviews ${year}`,
-        ];
-        const searchClient = new OpenClawSearchClient(({ args, signal: searchSignal }) =>
-          api.runtime.webSearch.search({ config: api.config, args, signal: searchSignal }),
-        );
-        const groups = await Promise.all(queries.map(async (query) => ({
-          query,
-          results: await searchClient.search(query, resultsPerQuery ?? 8, signal),
-        })));
-        const seen = new Set<string>();
-        const results = groups.flatMap(({ query, results }) => results.flatMap((result) => {
-          if (seen.has(result.url)) return [];
-          seen.add(result.url);
-          return [{ ...result, discoveredByQuery: query }];
-        }));
-        return { research, queries, results };
-      },
-    }),
-    tool({
-      name: "inventory_research_record",
-      description: "Persist an evidence-backed research snapshot with exactly one current recommendation. Low-rated and generic marketplace sellers cannot be positive candidates under the default policy.",
-      parameters: Type.Object({
-        topicId: researchTopicIdSchema,
-        summary: Type.String({ minLength: 1, maxLength: 20_000 }),
-        candidates: Type.Array(Type.Object({
-          url: Type.String({ format: "uri" }),
-          title: Type.String({ minLength: 1, maxLength: 1_000 }),
-          brand: Type.Optional(Type.String({ minLength: 1, maxLength: 500 })),
-          seller: Type.Optional(Type.String({ minLength: 1, maxLength: 500 })),
-          sellerType: researchSellerTypeSchema,
-          sellerRating: Type.Optional(Type.Number({ minimum: 0, maximum: 5 })),
-          reviewCount: Type.Optional(Type.Integer({ minimum: 0, maximum: 1_000_000_000 })),
-          price: Type.Optional(Type.Number({ minimum: 0 })),
-          currency: Type.Optional(Type.String({ minLength: 3, maxLength: 10 })),
-          verdict: researchVerdictSchema,
-          rationale: Type.String({ minLength: 1, maxLength: 10_000 }),
-          evidence: Type.Array(Type.Object({
-            url: Type.String({ format: "uri" }),
-            label: Type.Optional(Type.String({ minLength: 1, maxLength: 500 })),
-            claim: Type.Optional(Type.String({ minLength: 1, maxLength: 2_000 })),
-          }, { additionalProperties: false }), { minItems: 1, maxItems: 20 }),
-        }, { additionalProperties: false }), { minItems: 1, maxItems: 50 }),
-      }, { additionalProperties: false }),
-      execute: async ({ topicId, ...input }, config, { api, signal }) => {
-        signal?.throwIfAborted();
-        return withResearch(api, config.persistence?.databasePath, (service) => service.record(topicId, input));
-      },
-    }),
-    tool({
-      name: "inventory_research_promote",
-      description: "Promote a researched candidate into a new or existing wishlist item. The selected listing becomes a saved exact target; continueResearch independently keeps or pauses future idea discovery.",
-      parameters: Type.Object({
-        topicId: researchTopicIdSchema,
-        candidateId: Type.String({ minLength: 1 }),
-        continueResearch: Type.Boolean(),
-        existingWishlistItemId: Type.Optional(wishlistIdSchema),
-        wishlist: Type.Optional(Type.Object({
-          name: Type.Optional(Type.String({ minLength: 1, maxLength: 500 })),
-          category: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
-          priority: Type.Optional(wishlistPrioritySchema),
-          status: Type.Optional(wishlistStatusSchema),
-          desiredQuantity: Type.Optional(Type.Integer({ minimum: 1, maximum: 100_000 })),
-          notes: Type.Optional(Type.String({ minLength: 1, maxLength: 10_000 })),
-          tags: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 100 }), { maxItems: 50 })),
-        }, { additionalProperties: false })),
-      }, { additionalProperties: false }),
-      execute: async ({ topicId, ...input }, config, { api, signal }) => {
-        signal?.throwIfAborted();
-        return withResearch(api, config.persistence?.databasePath, (service) => service.promote(topicId, input));
       },
     }),
     tool({

@@ -20,13 +20,15 @@ export function formatInventoryNotification(payload: NotificationPayload): strin
       url: payload.url,
       snippet: payload.resultSnippet,
     }] : []);
-    const label = results.length === 1 ? "result" : "results";
+    const label = results.length === 1 ? "listing" : "listings";
     const lines = [
-      `🔎 ${results.length} new ${payload.retailerDomain ?? "retailer"} ${label} for “${payload.searchQuery ?? payload.productName}”`,
+      `🔎 ${results.length} ${payload.retailerDomain ?? "retailer"} catalog ${label} for “${payload.searchQuery ?? payload.productName}”`,
+      "",
+      "**Listing discovery only — availability and stock were not checked.**",
       "",
     ];
     for (const [index, result] of results.entries()) {
-      const prefix = result.reappeared ? "↩️ Back: " : "";
+      const prefix = result.reappeared ? "↩️ Listing returned after confirmed absence: " : "🆕 New listing: ";
       lines.push(`${index + 1}. ${prefix}[${result.title}](${result.url})`);
       if (result.snippet) lines.push(`   ${result.snippet}`);
     }

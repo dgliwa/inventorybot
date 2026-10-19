@@ -116,8 +116,8 @@ export class InventoryDatabase {
     }
     migrate() {
         const version = this.#database.prepare("PRAGMA user_version").get();
-        if (version.user_version > 8) {
-            throw new Error(`InventoryBot database schema ${version.user_version} is newer than supported schema 8.`);
+        if (version.user_version > 9) {
+            throw new Error(`InventoryBot database schema ${version.user_version} is newer than supported schema 9.`);
         }
         this.#database.exec(`
       CREATE TABLE IF NOT EXISTS products (
@@ -487,6 +487,16 @@ export class InventoryDatabase {
         COMMIT;
       `);
         }
+        if (version.user_version < 9) {
+            this.#database.exec(`
+        BEGIN IMMEDIATE;
+        ALTER TABLE search_watch_results ADD COLUMN present INTEGER NOT NULL DEFAULT 1 CHECK(present IN (0, 1));
+        ALTER TABLE search_watch_results ADD COLUMN consecutive_misses INTEGER NOT NULL DEFAULT 0 CHECK(consecutive_misses >= 0);
+        ALTER TABLE search_watch_results ADD COLUMN last_notified_at TEXT;
+        PRAGMA user_version = 9;
+        COMMIT;
+      `);
+        }
     }
     createWishlistItem(item) {
         this.#database.exec("BEGIN IMMEDIATE;");
@@ -796,7 +806,8 @@ export class InventoryDatabase {
     }
     listSearchWatchResults(watchId, limit = 50) {
         const rows = this.#database.prepare(`
-      SELECT url, title, snippet, first_seen_at, last_seen_at
+      SELECT url, title, snippet, first_seen_at, last_seen_at,
+             present, consecutive_misses, last_notified_at
       FROM search_watch_results WHERE watch_id = ?
       ORDER BY first_seen_at DESC LIMIT ?
     `).all(watchId, limit);
@@ -806,48 +817,82 @@ export class InventoryDatabase {
             ...(row.snippet ? { snippet: row.snippet } : {}),
             firstSeenAt: row.first_seen_at,
             lastSeenAt: row.last_seen_at,
+            present: row.present === 1,
+            consecutiveMisses: Number(row.consecutive_misses),
+            ...(row.last_notified_at ? { lastNotifiedAt: row.last_notified_at } : {}),
+            listingKind: "catalog_listing",
+            availability: "not_checked",
         }));
     }
     recordSearchWatchResults(input) {
+        const absenceThreshold = input.absenceThreshold ?? 3;
+        const cooldownMs = (input.notificationCooldownHours ?? 24) * 3_600_000;
         const existing = this.#database.prepare(`
-      SELECT first_seen_at, last_seen_at
+      SELECT first_seen_at, last_seen_at, present, consecutive_misses, last_notified_at
       FROM search_watch_results WHERE watch_id = ? AND url = ?
     `);
-        const upsert = this.#database.prepare(`
-      INSERT INTO search_watch_results(watch_id, url, title, snippet, first_seen_at, last_seen_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(watch_id, url) DO UPDATE SET
-        title = excluded.title,
-        snippet = excluded.snippet,
-        last_seen_at = excluded.last_seen_at
+        const insert = this.#database.prepare(`
+      INSERT INTO search_watch_results(
+        watch_id, url, title, snippet, first_seen_at, last_seen_at,
+        present, consecutive_misses, last_notified_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 1, 0, ?)
     `);
-        const added = [];
+        const updatePresent = this.#database.prepare(`
+      UPDATE search_watch_results SET
+        title = ?, snippet = ?, last_seen_at = ?, present = 1,
+        consecutive_misses = 0, last_notified_at = ?
+      WHERE watch_id = ? AND url = ?
+    `);
+        const markMissing = this.#database.prepare(`
+      UPDATE search_watch_results SET
+        consecutive_misses = consecutive_misses + 1,
+        present = CASE WHEN consecutive_misses + 1 >= ? THEN 0 ELSE present END
+      WHERE watch_id = ? AND present = 1 AND url NOT IN (SELECT value FROM json_each(?))
+    `);
+        const notify = [];
+        const currentUrls = input.results.map((result) => result.url);
         this.#database.exec("BEGIN IMMEDIATE;");
         try {
+            markMissing.run(absenceThreshold, input.watchId, JSON.stringify(currentUrls));
             for (const result of input.results) {
                 const prior = existing.get(input.watchId, result.url);
-                const reappeared = Boolean(prior && input.previousCheckedAt && prior.last_seen_at < input.previousCheckedAt);
-                upsert.run(input.watchId, result.url, result.title ?? null, result.snippet ?? null, input.checkedAt, input.checkedAt);
-                if (!prior || reappeared) {
-                    added.push({
+                const reappeared = prior?.present === 0 && prior.consecutive_misses >= absenceThreshold;
+                const cooldownElapsed = !prior?.last_notified_at
+                    || Date.parse(input.checkedAt) - Date.parse(prior.last_notified_at) >= cooldownMs;
+                const shouldNotify = !prior || (reappeared && cooldownElapsed);
+                const lastNotifiedAt = shouldNotify && input.markNotifications
+                    ? input.checkedAt
+                    : prior?.last_notified_at ?? null;
+                if (prior) {
+                    updatePresent.run(result.title ?? null, result.snippet ?? null, input.checkedAt, lastNotifiedAt, input.watchId, result.url);
+                }
+                else {
+                    insert.run(input.watchId, result.url, result.title ?? null, result.snippet ?? null, input.checkedAt, input.checkedAt, lastNotifiedAt);
+                }
+                if (shouldNotify) {
+                    notify.push({
                         ...result,
                         firstSeenAt: prior?.first_seen_at ?? input.checkedAt,
                         lastSeenAt: input.checkedAt,
+                        present: true,
+                        consecutiveMisses: 0,
+                        ...(lastNotifiedAt ? { lastNotifiedAt } : {}),
                         ...(reappeared ? { reappeared: true } : {}),
+                        listingKind: "catalog_listing",
+                        availability: "not_checked",
                     });
                 }
             }
             this.#database.prepare(`
-        UPDATE search_watches SET last_checked_at = ?, next_check_at = ?, updated_at = ?
-        WHERE id = ?
+        UPDATE search_watches SET last_checked_at = ?, next_check_at = ?, updated_at = ? WHERE id = ?
       `).run(input.checkedAt, input.nextCheckAt, input.checkedAt, input.watchId);
             this.#database.exec("COMMIT;");
+            return notify;
         }
         catch (error) {
             this.#database.exec("ROLLBACK;");
             throw error;
         }
-        return added;
     }
     enqueueNotification(input) {
         const result = this.#database.prepare(`

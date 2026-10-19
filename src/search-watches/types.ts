@@ -50,7 +50,12 @@ export type RetailerSearchWatch = {
 export type RetailerSearchWatchResult = SearchResult & {
   firstSeenAt: string;
   lastSeenAt: string;
+  present: boolean;
+  consecutiveMisses: number;
+  lastNotifiedAt?: string;
   reappeared?: boolean;
+  listingKind: "catalog_listing";
+  availability: "not_checked";
 };
 
 export type SearchWatchRunResult = {
