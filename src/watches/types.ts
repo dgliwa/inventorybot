@@ -6,6 +6,7 @@ export type InventoryWatchTarget = {
   domain: string;
   url: string;
   enabled: boolean;
+  retailerSubscriptionId?: string;
   latestResult?: InventoryResult;
   adapterReady?: boolean;
   adapterId?: string;

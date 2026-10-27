@@ -34,6 +34,7 @@ export function parseInventoryBotConfig(value) {
         },
         searchMonitoring: {
             enabled: searchMonitoring.enabled === true,
+            digestHourLocal: number(searchMonitoring.digestHourLocal, 9, 0, 23),
         },
         notifications: {
             ...(discord.enabled === true && typeof discord.target === "string" && discord.target.trim()

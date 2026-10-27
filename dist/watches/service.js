@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { normalizeDomain } from "../adapters/url.js";
 import { normalizeInventoryResult } from "../domain/inventory.js";
 import { checkInventory } from "../tools/check-inventory.js";
-import { detectInventoryTransition } from "./transitions.js";
+import { detectInventoryResultTransition } from "./transitions.js";
 function canonicalRetailerUrl(value) {
     const url = new URL(value);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
@@ -47,7 +47,22 @@ export class WatchService {
         const uniqueTargets = new Map();
         for (const retailer of input.retailers) {
             const normalized = canonicalRetailerUrl(retailer.url);
-            uniqueTargets.set(normalized.url, { ...normalized, enabled: retailer.enabled ?? true });
+            if (retailer.retailerSubscriptionId) {
+                const subscription = this.database.getRetailerSubscription(retailer.retailerSubscriptionId);
+                if (!subscription || !subscription.enabled) {
+                    throw new Error(`RETAILER_SUBSCRIPTION_UNAVAILABLE: ${retailer.retailerSubscriptionId}`);
+                }
+                if (subscription.domain !== normalized.domain) {
+                    throw new Error(`RETAILER_SUBSCRIPTION_DOMAIN_MISMATCH: ${subscription.domain} != ${normalized.domain}`);
+                }
+            }
+            uniqueTargets.set(normalized.url, {
+                ...normalized,
+                enabled: retailer.enabled ?? true,
+                ...(retailer.retailerSubscriptionId
+                    ? { retailerSubscriptionId: retailer.retailerSubscriptionId }
+                    : {}),
+            });
         }
         if (input.requireActiveAdapter) {
             const unsupported = [...uniqueTargets.values()].filter(({ url }) => !this.registry.get(url));
@@ -112,6 +127,9 @@ export class WatchService {
                     expectedProduct: watch.product,
                     timeoutMs: options.timeoutMs,
                     signal: options.signal,
+                    ...(target.retailerSubscriptionId
+                        ? { retailerSubscription: this.database.getRetailerSubscription(target.retailerSubscriptionId) }
+                        : {}),
                 }, this.registry));
             }
             catch (error) {
@@ -132,8 +150,9 @@ export class WatchService {
             }
             options.signal?.throwIfAborted();
             const durationMs = Math.max(0, Math.round(performance.now() - before));
-            const previousStatus = this.database.latestStatus(target.id);
-            const transition = detectInventoryTransition(previousStatus, result.status, {
+            const previousResult = this.database.latestResult(target.id);
+            const previousStatus = previousResult?.status;
+            const transition = detectInventoryResultTransition(previousResult, result, {
                 notifyWhenUnavailable: options.notifyWhenUnavailable,
             });
             const adapterId = adapter?.id;
@@ -165,6 +184,7 @@ export class WatchService {
                                 ...(result.price !== undefined ? { price: result.price } : {}),
                                 ...(result.currency ? { currency: result.currency } : {}),
                                 confidence: result.confidence,
+                                ...(result.fulfillment ? { fulfillment: result.fulfillment } : {}),
                                 checkedAt: result.checkedAt,
                             },
                         },

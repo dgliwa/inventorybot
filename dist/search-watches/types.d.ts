@@ -50,6 +50,18 @@ export type RetailerSearchWatchResult = SearchResult & {
     listingKind: "catalog_listing";
     availability: "not_checked";
 };
+export type SearchDiscoveryEvent = {
+    id: number;
+    watchId: string;
+    domain: string;
+    query: string;
+    url: string;
+    title?: string;
+    snippet?: string;
+    kind: "new" | "returned";
+    observedAt: string;
+    present: boolean;
+};
 export type SearchWatchRunResult = {
     watchId: string;
     domain: string;

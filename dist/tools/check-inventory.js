@@ -42,6 +42,7 @@ export async function checkInventory(input, registry) {
         expectedProduct: input.expectedProduct,
         timeoutMs: input.timeoutMs,
         signal: input.signal,
+        retailerSubscription: input.retailerSubscription,
     };
     return adapter.checkInventory(input.url, context);
 }

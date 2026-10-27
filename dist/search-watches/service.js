@@ -51,8 +51,8 @@ export class SearchWatchService {
         if (!query)
             throw new Error("Search interest must not be empty.");
         const cadenceMinutes = input.cadenceMinutes ?? 60;
-        if (!Number.isInteger(cadenceMinutes) || cadenceMinutes < 5) {
-            throw new Error("Search cadence must be an integer of at least 5 minutes.");
+        if (!Number.isInteger(cadenceMinutes) || cadenceMinutes < 60) {
+            throw new Error("Discovery cadence must be an integer of at least 60 minutes.");
         }
         input.signal?.throwIfAborted();
         const discovery = await this.searchClient.discover(domain, query, input.signal);
@@ -81,8 +81,8 @@ export class SearchWatchService {
         const query = input.query === undefined ? current.query : input.query.trim();
         if (!query)
             throw new Error("Search interest must not be empty.");
-        if (input.cadenceMinutes !== undefined && (!Number.isInteger(input.cadenceMinutes) || input.cadenceMinutes < 5)) {
-            throw new Error("Search cadence must be an integer of at least 5 minutes.");
+        if (input.cadenceMinutes !== undefined && (!Number.isInteger(input.cadenceMinutes) || input.cadenceMinutes < 60)) {
+            throw new Error("Discovery cadence must be an integer of at least 60 minutes.");
         }
         const resetBaseline = domain !== current.domain || query !== current.query || !current.adapter;
         let adapter = current.adapter;
@@ -158,42 +158,16 @@ export class SearchWatchService {
                 nextCheckAt,
                 absenceThreshold: 3,
                 notificationCooldownHours: 24,
-                markNotifications: !suppressInitial && Boolean(options.notification),
+                markNotifications: false,
             });
-        let notificationsRecommended = 0;
-        if (!options.dryRun && options.notification && !suppressInitial && newResults.length > 0) {
-            const payload = {
-                kind: "search_result",
+        if (!options.dryRun && !suppressInitial && newResults.length > 0) {
+            this.database.recordSearchDiscoveryEvents({
                 watchId: watch.id,
-                searchWatchId: watch.id,
-                searchQuery: watch.query,
-                productName: watch.query,
-                retailerDomain: watch.domain,
-                currentStatus: "catalog_listings_discovered",
-                checkedAt,
-                searchResults: newResults.map((result) => ({
-                    title: result.title ?? result.url,
-                    url: result.url,
-                    listingKind: result.listingKind,
-                    availability: result.availability,
-                    ...(result.snippet ? { snippet: result.snippet } : {}),
-                    ...(result.reappeared ? { reappeared: true } : {}),
-                })),
-            };
-            if (this.database.enqueueNotification({
-                sourceKind: "search_watch",
-                sourceId: watch.id,
-                fingerprint: `search:${watch.id}:${checkedAt}`,
-                channel: options.notification.channel,
-                target: options.notification.target,
-                accountId: options.notification.accountId,
-                threadId: options.notification.threadId,
-                transition: "catalog_listings_discovered",
-                payload,
-                createdAt: checkedAt,
-            }))
-                notificationsRecommended = 1;
+                results: newResults,
+                observedAt: checkedAt,
+            });
         }
+        const notificationsRecommended = 0;
         const searchUrl = watch.adapter.kind === "html_get"
             ? new URL(watch.adapter.searchUrl)
             : new URL(watch.adapter.kind === "bestbuy_html"

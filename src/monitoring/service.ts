@@ -9,6 +9,7 @@ import type { RetailerInspection } from "../inspection/types.js";
 import { NotificationDispatcher } from "../notifications/dispatcher.js";
 import type { NotificationChannel } from "../notifications/types.js";
 import type { InventoryDatabase } from "../persistence/db.js";
+import { DiscoveryDigestService } from "../search-watches/digest.js";
 import { SearchWatchService } from "../search-watches/service.js";
 import type { DeterministicSearchClient, SearchWatchRunResult } from "../search-watches/types.js";
 import { WatchService, type WatchLogRecord } from "../watches/service.js";
@@ -317,7 +318,6 @@ export class InventoryMonitor {
           const result = await service.run(watch.id, {
             signal: options.signal,
             dryRun: options.dryRun,
-            notification,
           });
           summary.watchesRun += 1;
           summary.newResults += result.newResults.length;
@@ -326,8 +326,21 @@ export class InventoryMonitor {
         } catch (error) {
           options.signal?.throwIfAborted();
           summary.failures += 1;
+          if (!options.dryRun) {
+            database.deferSearchWatchAfterFailure(
+              watch.id,
+              this.#now().toISOString(),
+              Math.max(60, watch.cadenceMinutes),
+            );
+          }
           this.#log({ event: "inventory_search_watch_failed", watch_id: watch.id, error: safeError(error) });
         }
+      }
+      if (!options.dryRun) {
+        new DiscoveryDigestService(database, this.#now).run({
+          digestHourLocal: this.#config.searchMonitoring.digestHourLocal,
+          ...(notification ? { target: notification } : {}),
+        });
       }
       if (!options.dryRun && options.deliverNotifications !== false) {
         summary.delivery = await new NotificationDispatcher(

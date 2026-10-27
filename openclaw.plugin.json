@@ -1,7 +1,7 @@
 {
   "id": "inventorybot",
   "name": "InventoryBot",
-  "description": "Manage general wishlists, discover retailers, validate adapters, schedule inventory watches, and deliver transition notifications.",
+  "description": "Manage wishlists, aggregate retailer discovery, and monitor exact-product fulfillment availability.",
   "version": "0.1.0",
   "configSchema": {
     "type": "object",
@@ -43,7 +43,8 @@
       "searchMonitoring": {
         "type": "object",
         "properties": {
-          "enabled": { "type": "boolean", "default": false }
+          "enabled": { "type": "boolean", "default": false },
+          "digestHourLocal": { "type": "integer", "minimum": 0, "maximum": 23, "default": 9 }
         },
         "additionalProperties": false
       },
@@ -87,6 +88,10 @@
       "inventory_wishlist_monitor_attach",
       "inventory_wishlist_monitor_detach",
       "inventory_wishlist_summary",
+      "inventory_retailer_subscribe",
+      "inventory_retailer_subscription_update",
+      "inventory_retailer_subscription_status",
+      "inventory_retailer_unsubscribe",
       "discover_retailers",
       "check_inventory",
       "inspect_retailer",
@@ -121,6 +126,9 @@
     "inventory_wishlist_purchase_delete": { "sideEffecting": true },
     "inventory_wishlist_monitor_attach": { "sideEffecting": true },
     "inventory_wishlist_monitor_detach": { "sideEffecting": true },
+    "inventory_retailer_subscribe": { "sideEffecting": true },
+    "inventory_retailer_subscription_update": { "sideEffecting": true },
+    "inventory_retailer_unsubscribe": { "sideEffecting": true },
     "inventory_notification_test": {
       "optional": true,
       "sideEffecting": true

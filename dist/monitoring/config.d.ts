@@ -19,6 +19,7 @@ export type InventoryBotConfig = {
     };
     searchMonitoring: {
         enabled: boolean;
+        digestHourLocal: number;
     };
     notifications: {
         discord?: {

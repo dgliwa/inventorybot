@@ -5,7 +5,8 @@ import type { AdapterCandidate, AdapterValidationReport } from "../generation/ty
 import type { RetailerInspection } from "../inspection/types.js";
 import type { NotificationPayload, PendingNotification } from "../notifications/types.js";
 import type { ResearchCandidate, ResearchPromotion, ResearchRun, ResearchTopic, ResearchTopicStatus } from "../research/types.js";
-import type { DeterministicSearchAdapter, RetailerSearchWatch, RetailerSearchWatchResult } from "../search-watches/types.js";
+import type { RetailerSubscription, RetailerStorePreference } from "../retailers/types.js";
+import type { DeterministicSearchAdapter, RetailerSearchWatch, RetailerSearchWatchResult, SearchDiscoveryEvent } from "../search-watches/types.js";
 import type { InventoryWatch } from "../watches/types.js";
 import type { WishlistItem, WishlistItemDetail, WishlistLink, WishlistPriority, WishlistPurchase, WishlistStatus } from "../wishlist/types.js";
 export type CreateWatchRecord = {
@@ -17,6 +18,7 @@ export type CreateWatchRecord = {
         domain: string;
         url: string;
         enabled: boolean;
+        retailerSubscriptionId?: string;
     }>;
     enabled: boolean;
     createdAt: string;
@@ -99,6 +101,17 @@ export declare class InventoryDatabase {
     removeWishlistPurchase(itemId: string, purchaseId: string): boolean;
     attachWishlistMonitor(itemId: string, kind: "inventory" | "search", watchId: string, createdAt: string): void;
     detachWishlistMonitor(itemId: string, kind: "inventory" | "search", watchId: string): boolean;
+    createRetailerSubscription(subscription: RetailerSubscription): RetailerSubscription;
+    getRetailerSubscription(id: string): RetailerSubscription | undefined;
+    listRetailerSubscriptions(): RetailerSubscription[];
+    updateRetailerSubscription(id: string, changes: {
+        postalCode?: string;
+        radiusMiles?: number;
+        stores?: RetailerStorePreference[];
+        enabled?: boolean;
+        updatedAt: string;
+    }): RetailerSubscription | undefined;
+    disableRetailerSubscription(id: string, updatedAt: string): boolean;
     createWatch(record: CreateWatchRecord): InventoryWatch;
     getWatch(id: string): InventoryWatch | undefined;
     listWatches(): InventoryWatch[];
@@ -117,9 +130,22 @@ export declare class InventoryDatabase {
         updatedAt: string;
         resetBaseline?: boolean;
     }): RetailerSearchWatch | undefined;
+    deferSearchWatchAfterFailure(id: string, attemptedAt: string, retryMinutes?: number): boolean;
     disableSearchWatch(id: string, updatedAt: string): boolean;
     removeSearchWatch(id: string): boolean;
     listSearchWatchResults(watchId: string, limit?: number): RetailerSearchWatchResult[];
+    recordSearchDiscoveryEvents(input: {
+        watchId: string;
+        results: RetailerSearchWatchResult[];
+        observedAt: string;
+    }): number;
+    listPendingSearchDiscoveryEvents(limit?: number): SearchDiscoveryEvent[];
+    hasDiscoveryDigestRun(localDate: string): boolean;
+    completeDiscoveryDigest(input: {
+        localDate: string;
+        completedAt: string;
+        eventIds: number[];
+    }): void;
     recordSearchWatchResults(input: {
         watchId: string;
         results: Array<{
@@ -145,6 +171,7 @@ export declare class InventoryDatabase {
         payload: NotificationPayload;
         createdAt: string;
     }): boolean;
+    latestResult(targetId: string): InventoryResult | undefined;
     latestStatus(targetId: string): InventoryStatus | undefined;
     recordObservation(input: {
         watchId: string;

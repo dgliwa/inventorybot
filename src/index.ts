@@ -25,6 +25,7 @@ import { SearchWatchService } from "./search-watches/service.js";
 import type { NotificationChannel } from "./notifications/types.js";
 import { InventoryDatabase } from "./persistence/db.js";
 import { resolveInventoryDatabasePath } from "./persistence/path.js";
+import { RetailerSubscriptionService } from "./retailers/subscriptions.js";
 import { checkInventory } from "./tools/check-inventory.js";
 import { WatchService } from "./watches/service.js";
 import { WishlistService } from "./wishlist/service.js";
@@ -137,6 +138,16 @@ const wishlistIdSchema = Type.String({ minLength: 1, description: "Wishlist item
 const nullableTextSchema = Type.Union([Type.String({ minLength: 1 }), Type.Null()]);
 const nullableMoneySchema = Type.Union([Type.Number({ minimum: 0 }), Type.Null()]);
 
+const retailerStoreSchema = Type.Object(
+  {
+    storeId: Type.String({ minLength: 1, maxLength: 200 }),
+    name: Type.String({ minLength: 1, maxLength: 500 }),
+    address: Type.Optional(Type.String({ minLength: 1, maxLength: 1_000 })),
+    primary: Type.Optional(Type.Boolean({ default: false })),
+  },
+  { additionalProperties: false },
+);
+
 const productIdentitySchema = Type.Object(
   {
     name: Type.Optional(Type.String()),
@@ -192,7 +203,7 @@ const inventoryToolPlugin = defineToolPlugin({
   id: "inventorybot",
   name: "InventoryBot",
   description:
-    "Discover retailers, validate deterministic adapters, and persist inventory watches and observations.",
+    "Track hourly catalog discovery separately from exact-product shipping, pickup, and store availability.",
   configSchema: Type.Object(
     {
       adapterPromotion: Type.Optional(
@@ -248,6 +259,9 @@ const inventoryToolPlugin = defineToolPlugin({
         Type.Object(
           {
             enabled: Type.Optional(Type.Boolean({ default: false })),
+            digestHourLocal: Type.Optional(
+              Type.Integer({ minimum: 0, maximum: 23, default: 9 }),
+            ),
           },
           { additionalProperties: false },
         ),
@@ -457,6 +471,83 @@ const inventoryToolPlugin = defineToolPlugin({
       },
     }),
     tool({
+      name: "inventory_retailer_subscribe",
+      description: "Save a retailer location profile for exact-product shipping, pickup, delivery, and store inventory checks.",
+      parameters: Type.Object({
+        domain: Type.String({ minLength: 1 }),
+        postalCode: Type.String({ minLength: 1, maxLength: 20 }),
+        radiusMiles: Type.Optional(Type.Integer({ minimum: 1, maximum: 250, default: 25 })),
+        stores: Type.Optional(Type.Array(retailerStoreSchema, { maxItems: 50 })),
+        enabled: Type.Optional(Type.Boolean({ default: true })),
+      }, { additionalProperties: false }),
+      execute: async (input, config, { api, signal }) => {
+        signal?.throwIfAborted();
+        const database = openInventoryDatabase(api, config.persistence?.databasePath);
+        try {
+          return new RetailerSubscriptionService(database).add(input);
+        } finally {
+          database.close();
+        }
+      },
+    }),
+    tool({
+      name: "inventory_retailer_subscription_update",
+      description: "Update a retailer subscription's postal code, radius, preferred stores, primary store, or enabled state.",
+      parameters: Type.Object({
+        subscriptionId: Type.String({ minLength: 1 }),
+        postalCode: Type.Optional(Type.String({ minLength: 1, maxLength: 20 })),
+        radiusMiles: Type.Optional(Type.Integer({ minimum: 1, maximum: 250 })),
+        stores: Type.Optional(Type.Array(retailerStoreSchema, { maxItems: 50 })),
+        enabled: Type.Optional(Type.Boolean()),
+      }, { additionalProperties: false }),
+      execute: async (input, config, { api, signal }) => {
+        signal?.throwIfAborted();
+        const database = openInventoryDatabase(api, config.persistence?.databasePath);
+        try {
+          return new RetailerSubscriptionService(database).update(input) ?? {
+            error: { code: "RETAILER_SUBSCRIPTION_NOT_FOUND", message: `No retailer subscription exists with id ${input.subscriptionId}.` },
+          };
+        } finally {
+          database.close();
+        }
+      },
+    }),
+    tool({
+      name: "inventory_retailer_subscription_status",
+      description: "Read one or all retailer location subscriptions used by exact-product watches.",
+      parameters: Type.Object({
+        subscriptionId: Type.Optional(Type.String({ minLength: 1 })),
+      }, { additionalProperties: false }),
+      execute: async ({ subscriptionId }, config, { api, signal }) => {
+        signal?.throwIfAborted();
+        const database = openInventoryDatabase(api, config.persistence?.databasePath);
+        try {
+          const result = new RetailerSubscriptionService(database).status(subscriptionId);
+          return result ?? {
+            error: { code: "RETAILER_SUBSCRIPTION_NOT_FOUND", message: `No retailer subscription exists with id ${subscriptionId}.` },
+          };
+        } finally {
+          database.close();
+        }
+      },
+    }),
+    tool({
+      name: "inventory_retailer_unsubscribe",
+      description: "Disable a retailer location subscription while preserving exact-watch and observation history.",
+      parameters: Type.Object({
+        subscriptionId: Type.String({ minLength: 1 }),
+      }, { additionalProperties: false }),
+      execute: async ({ subscriptionId }, config, { api, signal }) => {
+        signal?.throwIfAborted();
+        const database = openInventoryDatabase(api, config.persistence?.databasePath);
+        try {
+          return { subscriptionId, disabled: new RetailerSubscriptionService(database).remove(subscriptionId) };
+        } finally {
+          database.close();
+        }
+      },
+    }),
+    tool({
       name: "discover_retailers",
       description:
         "Find direct retailer product pages using exact identifiers first, then product-name and preferred-retailer searches. Discovery identifies candidates only; it never verifies stock or creates watches.",
@@ -495,6 +586,7 @@ const inventoryToolPlugin = defineToolPlugin({
         {
           url: Type.String({ format: "uri", description: "Absolute retailer product URL." }),
           expectedProduct: Type.Optional(productIdentitySchema),
+          retailerSubscriptionId: Type.Optional(Type.String({ minLength: 1 })),
           timeoutMs: Type.Optional(
             Type.Number({ minimum: 1, maximum: 60_000, default: 10_000 }),
           ),
@@ -505,8 +597,27 @@ const inventoryToolPlugin = defineToolPlugin({
         signal?.throwIfAborted();
         const database = openInventoryDatabase(api, config.persistence?.databasePath);
         try {
+          const subscription = input.retailerSubscriptionId
+            ? database.getRetailerSubscription(input.retailerSubscriptionId)
+            : undefined;
+          if (input.retailerSubscriptionId && !subscription) {
+            return {
+              status: "error" as const,
+              confidence: 1,
+              domain: normalizeDomain(input.url),
+              url: input.url,
+              method: "unknown" as const,
+              checkedAt: new Date().toISOString(),
+              evidence: { summary: "The requested retailer subscription does not exist." },
+              error: {
+                code: "RETAILER_SUBSCRIPTION_NOT_FOUND",
+                message: `No retailer subscription exists with id ${input.retailerSubscriptionId}.`,
+              },
+            };
+          }
+          const { retailerSubscriptionId: _subscriptionId, ...checkInput } = input;
           return await checkInventory(
-            { ...input, signal },
+            { ...checkInput, signal, ...(subscription ? { retailerSubscription: subscription } : {}) },
             activeAdapterRegistry(api, database),
           );
         } finally {
@@ -716,6 +827,7 @@ const inventoryToolPlugin = defineToolPlugin({
               {
                 url: Type.String({ format: "uri" }),
                 enabled: Type.Optional(Type.Boolean({ default: true })),
+                retailerSubscriptionId: Type.Optional(Type.String({ minLength: 1 })),
               },
               { additionalProperties: false },
             ),
@@ -851,7 +963,7 @@ const inventoryToolPlugin = defineToolPlugin({
           domain: Type.String({ minLength: 1 }),
           query: Type.String({ minLength: 1, maxLength: 500 }),
           cadenceMinutes: Type.Optional(
-            Type.Integer({ minimum: 5, maximum: 43_200, default: 60 }),
+            Type.Integer({ minimum: 60, maximum: 43_200, default: 60 }),
           ),
           enabled: Type.Optional(Type.Boolean({ default: true })),
           notifyOnInitialResults: Type.Optional(Type.Boolean({ default: true })),
@@ -882,7 +994,7 @@ const inventoryToolPlugin = defineToolPlugin({
           watchId: Type.String({ minLength: 1 }),
           domain: Type.Optional(Type.String({ minLength: 1 })),
           query: Type.Optional(Type.String({ minLength: 1, maxLength: 500 })),
-          cadenceMinutes: Type.Optional(Type.Integer({ minimum: 5, maximum: 43_200 })),
+          cadenceMinutes: Type.Optional(Type.Integer({ minimum: 60, maximum: 43_200 })),
           enabled: Type.Optional(Type.Boolean()),
           notifyOnInitialResults: Type.Optional(Type.Boolean()),
         },
@@ -997,6 +1109,7 @@ const inventoryToolPlugin = defineToolPlugin({
               slowIntervalHours: parsed.monitoring.slowIntervalHours,
               discordEnabled: parsed.notifications.discord?.enabled === true,
               searchMonitoringEnabled: parsed.searchMonitoring.enabled,
+              discoveryDigestHourLocal: parsed.searchMonitoring.digestHourLocal,
             },
             adapterCoverage: {
               watches: watches.length,
@@ -1123,7 +1236,7 @@ export default definePluginEntry({
   id: "inventorybot",
   name: "InventoryBot",
   description:
-    "Manage general wishlists, discover retailers, validate adapters, schedule inventory watches, and deliver transition notifications.",
+    "Manage wishlists, aggregate retailer discovery, and monitor exact-product fulfillment availability.",
   configSchema: inventoryToolPlugin.configSchema,
   register(api) {
     inventoryToolPlugin.register?.(api);

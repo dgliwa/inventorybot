@@ -15,6 +15,7 @@ export type InventoryBotConfig = {
   };
   searchMonitoring: {
     enabled: boolean;
+    digestHourLocal: number;
   };
   notifications: {
     discord?: {
@@ -67,6 +68,7 @@ export function parseInventoryBotConfig(value: unknown): InventoryBotConfig {
     },
     searchMonitoring: {
       enabled: searchMonitoring.enabled === true,
+      digestHourLocal: number(searchMonitoring.digestHourLocal, 9, 0, 23),
     },
     notifications: {
       ...(discord.enabled === true && typeof discord.target === "string" && discord.target.trim()

@@ -3,6 +3,25 @@ export function formatInventoryNotification(payload) {
     if (payload.kind === "test") {
         return `🔔 InventoryBot test notification\n\nConfigured delivery is working.\n${payload.checkedAt}`;
     }
+    if (payload.kind === "discovery_digest") {
+        const groups = payload.discoveryGroups ?? [];
+        const total = groups.reduce((sum, group) => sum + group.results.length, 0);
+        const lines = [
+            `🔎 Daily inventory discovery — ${total} ${total === 1 ? "listing" : "listings"}`,
+            "",
+            "**Catalog discovery only — availability and stock were not checked.**",
+        ];
+        for (const group of groups) {
+            lines.push("", `**${group.retailerDomain} — “${group.searchQuery}”**`);
+            for (const result of group.results) {
+                const icon = result.discoveryKind === "returned" ? "↩️" : "🆕";
+                const state = result.present ? "present now" : "not present in the latest search";
+                lines.push(`${icon} [${result.title}](${result.url}) — ${state}`);
+            }
+        }
+        lines.push("", `Digest generated: ${payload.checkedAt}`);
+        return lines.join("\n");
+    }
     if (payload.kind === "search_result") {
         const results = payload.searchResults ?? (payload.url ? [{
                 title: payload.resultTitle ?? payload.productName,
@@ -34,6 +53,27 @@ export function formatInventoryNotification(payload) {
         lines.push(`SKU: ${payload.productSku}`);
     if (payload.retailerDomain)
         lines.push(`Retailer: ${payload.retailerDomain}`);
+    if (payload.fulfillment) {
+        const shipping = payload.fulfillment.shipping;
+        lines.push(`Shipping: ${shipping.status}${shipping.orderableOnline === true ? " — orderable online" : shipping.orderableOnline === false ? " — not orderable online" : ""}`);
+        if (payload.fulfillment.delivery) {
+            const delivery = payload.fulfillment.delivery;
+            lines.push(`Local delivery: ${delivery.status}${delivery.orderableOnline === true ? " — orderable online" : delivery.orderableOnline === false ? " — not orderable online" : ""}`);
+        }
+        for (const store of payload.fulfillment.stores) {
+            const pickup = store.pickupOrderable === true
+                ? "order online for pickup"
+                : store.pickupOrderable === false
+                    ? "pickup ordering unavailable"
+                    : "pickup orderability unknown";
+            const walkIn = store.walkInAvailable === true
+                ? "; walk-in stock reported"
+                : store.walkInAvailable === false
+                    ? "; no walk-in stock reported"
+                    : "";
+            lines.push(`${store.name}: ${store.stock}; ${pickup}${walkIn}`);
+        }
+    }
     if (payload.price !== undefined) {
         lines.push(`Price: ${payload.currency ? `${payload.currency} ` : ""}${payload.price.toFixed(2)}`);
     }
