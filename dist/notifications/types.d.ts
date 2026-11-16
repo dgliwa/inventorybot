@@ -28,6 +28,8 @@ export type NotificationPayload = {
             snippet?: string;
             discoveryKind: "new" | "returned";
             observedAt: string;
+            firstObservedAt: string;
+            activityCount: number;
             present: boolean;
             listingKind: "catalog_listing";
             availability: "not_checked";

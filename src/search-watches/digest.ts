@@ -37,12 +37,24 @@ function digestGroups(events: SearchDiscoveryEvent[]): NonNullable<NotificationP
       };
       groups.set(key, group);
     }
+    const existing = group.results.find(result => result.url === event.url);
+    if (existing) {
+      existing.title = event.title ?? event.url;
+      if (event.snippet) existing.snippet = event.snippet;
+      existing.discoveryKind = event.kind;
+      existing.observedAt = event.observedAt;
+      existing.present = event.present;
+      existing.activityCount += 1;
+      continue;
+    }
     group.results.push({
       title: event.title ?? event.url,
       url: event.url,
       ...(event.snippet ? { snippet: event.snippet } : {}),
       discoveryKind: event.kind,
       observedAt: event.observedAt,
+      firstObservedAt: event.observedAt,
+      activityCount: 1,
       present: event.present,
       listingKind: "catalog_listing",
       availability: "not_checked",

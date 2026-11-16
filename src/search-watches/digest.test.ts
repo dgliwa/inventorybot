@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { formatInventoryNotification } from "../notifications/discord.js";
 import { InventoryDatabase } from "../persistence/db.js";
 import { DiscoveryDigestService } from "./digest.js";
 import { SearchWatchService } from "./service.js";
@@ -33,13 +34,19 @@ describe("DiscoveryDigestService", () => {
       const search = new SearchWatchService(database, client, () => new Date("2026-01-01T08:00:00.000Z"));
       const watch = await search.add({ domain: "example.com", query: "magic gathering" });
       await search.run(watch.id);
-      expect(database.listPendingSearchDiscoveryEvents()).toHaveLength(1);
+      const [listing] = database.listSearchWatchResults(watch.id);
+      database.recordSearchDiscoveryEvents({
+        watchId: watch.id,
+        results: [{ ...listing!, reappeared: true }],
+        observedAt: "2026-01-01T08:30:00.000Z",
+      });
+      expect(database.listPendingSearchDiscoveryEvents()).toHaveLength(2);
 
       const digest = new DiscoveryDigestService(database, () => new Date(2026, 0, 1, 9));
       expect(digest.run({ target: { channel: "discord", target: "channel:123" } })).toEqual({
         localDate: "2026-01-01",
         alreadyCompleted: false,
-        events: 1,
+        events: 2,
         notificationQueued: true,
       });
       expect(database.listPendingSearchDiscoveryEvents()).toHaveLength(0);
@@ -59,9 +66,17 @@ describe("DiscoveryDigestService", () => {
         discoveryGroups: [{
           retailerDomain: "example.com",
           searchQuery: "magic gathering",
-          results: [{ availability: "not_checked", present: true }],
+          results: [{
+            availability: "not_checked",
+            present: true,
+            discoveryKind: "returned",
+            activityCount: 2,
+            firstObservedAt: "2026-01-01T08:00:00.000Z",
+            observedAt: "2026-01-01T08:30:00.000Z",
+          }],
         }],
       });
+      expect(formatInventoryNotification(notification!.payload)).toContain("2 discovery changes today");
     } finally {
       database.close();
     }

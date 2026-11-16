@@ -16,7 +16,8 @@ export function formatInventoryNotification(payload) {
             for (const result of group.results) {
                 const icon = result.discoveryKind === "returned" ? "↩️" : "🆕";
                 const state = result.present ? "present now" : "not present in the latest search";
-                lines.push(`${icon} [${result.title}](${result.url}) — ${state}`);
+                const activity = result.activityCount > 1 ? `; ${result.activityCount} discovery changes today` : "";
+                lines.push(`${icon} [${result.title}](${result.url}) — ${state}${activity}`);
             }
         }
         lines.push("", `Digest generated: ${payload.checkedAt}`);
