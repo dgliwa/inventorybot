@@ -77,7 +77,7 @@ notifications:
   baseRetrySeconds: 30
 ```
 
-Discovery scheduling uses each watch's cadence, with a minimum and default of 60 minutes. Search failures defer the next attempt by at least one hour rather than retrying every scheduler tick. The daily digest hour uses the gateway process's local time.
+Discovery scheduling uses each watch's cadence, with a minimum and default of 60 minutes. Repeated search failures use retailer-specific durable exponential backoff from one hour up to 24 hours, and a successful check resets the failure count. Runs containing failed watches are recorded as errors rather than completed successes. The daily digest hour uses the gateway process's local time.
 
 ## Discovery watches
 

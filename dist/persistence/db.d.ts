@@ -130,7 +130,7 @@ export declare class InventoryDatabase {
         updatedAt: string;
         resetBaseline?: boolean;
     }): RetailerSearchWatch | undefined;
-    deferSearchWatchAfterFailure(id: string, attemptedAt: string, retryMinutes?: number): boolean;
+    deferSearchWatchAfterFailure(id: string, attemptedAt: string, baseRetryMinutes?: number, error?: string): boolean;
     disableSearchWatch(id: string, updatedAt: string): boolean;
     removeSearchWatch(id: string): boolean;
     listSearchWatchResults(watchId: string, limit?: number): RetailerSearchWatchResult[];

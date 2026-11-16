@@ -331,6 +331,7 @@ export class InventoryMonitor {
               watch.id,
               this.#now().toISOString(),
               Math.max(60, watch.cadenceMinutes),
+            safeError(error),
             );
           }
           this.#log({ event: "inventory_search_watch_failed", watch_id: watch.id, error: safeError(error) });
@@ -355,7 +356,11 @@ export class InventoryMonitor {
         ).dispatch({ signal: options.signal });
       }
       if (runId !== undefined) {
-        database.completeMonitorRun(runId, { completedAt: this.#now().toISOString(), summary });
+        database.completeMonitorRun(runId, {
+          completedAt: this.#now().toISOString(),
+          summary,
+          ...(summary.failures > 0 ? { error: `${summary.failures} discovery watch${summary.failures === 1 ? "" : "es"} failed.` } : {}),
+        });
       }
       return summary;
     } catch (error) {

@@ -30,6 +30,8 @@ function hydrateSearchWatch(row) {
         updatedAt: row.updated_at,
         ...(row.last_checked_at ? { lastCheckedAt: row.last_checked_at } : {}),
         ...(row.next_check_at ? { nextCheckAt: row.next_check_at } : {}),
+        consecutiveFailures: Number(row.consecutive_failures),
+        ...(row.last_error ? { lastError: row.last_error } : {}),
     };
 }
 const INVENTORY_TABLES = [
@@ -119,8 +121,8 @@ export class InventoryDatabase {
     }
     migrate() {
         const version = this.#database.prepare("PRAGMA user_version").get();
-        if (version.user_version > 11) {
-            throw new Error(`InventoryBot database schema ${version.user_version} is newer than supported schema 11.`);
+        if (version.user_version > 12) {
+            throw new Error(`InventoryBot database schema ${version.user_version} is newer than supported schema 12.`);
         }
         this.#database.exec(`
       CREATE TABLE IF NOT EXISTS products (
@@ -544,6 +546,15 @@ export class InventoryDatabase {
         COMMIT;
       `);
         }
+        if (version.user_version < 12) {
+            this.#database.exec(`
+        BEGIN IMMEDIATE;
+        ALTER TABLE search_watches ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK(consecutive_failures >= 0);
+        ALTER TABLE search_watches ADD COLUMN last_error TEXT;
+        PRAGMA user_version = 12;
+        COMMIT;
+      `);
+        }
     }
     createWishlistItem(item) {
         this.#database.exec("BEGIN IMMEDIATE;");
@@ -847,7 +858,8 @@ export class InventoryDatabase {
     getSearchWatch(id) {
         const row = this.#database.prepare(`
       SELECT id, domain, query, cadence_minutes, enabled, notify_on_initial_results,
-             adapter_json, created_at, updated_at, last_checked_at, next_check_at
+             adapter_json, created_at, updated_at, last_checked_at, next_check_at,
+             consecutive_failures, last_error
       FROM search_watches WHERE id = ?
     `).get(id);
         return row ? hydrateSearchWatch(row) : undefined;
@@ -855,7 +867,8 @@ export class InventoryDatabase {
     listSearchWatches() {
         const rows = this.#database.prepare(`
       SELECT id, domain, query, cadence_minutes, enabled, notify_on_initial_results,
-             adapter_json, created_at, updated_at, last_checked_at, next_check_at
+             adapter_json, created_at, updated_at, last_checked_at, next_check_at,
+             consecutive_failures, last_error
       FROM search_watches ORDER BY created_at ASC
     `).all();
         return rows.map(hydrateSearchWatch);
@@ -889,12 +902,18 @@ export class InventoryDatabase {
         }
         return this.getSearchWatch(id);
     }
-    deferSearchWatchAfterFailure(id, attemptedAt, retryMinutes = 60) {
+    deferSearchWatchAfterFailure(id, attemptedAt, baseRetryMinutes = 60, error) {
+        const watch = this.getSearchWatch(id);
+        if (!watch?.enabled)
+            return false;
+        const consecutiveFailures = watch.consecutiveFailures + 1;
+        const retryMinutes = Math.min(24 * 60, baseRetryMinutes * 2 ** Math.min(consecutiveFailures - 1, 5));
         const nextCheckAt = new Date(Date.parse(attemptedAt) + retryMinutes * 60_000).toISOString();
         return this.#database.prepare(`
-      UPDATE search_watches SET last_checked_at = ?, next_check_at = ?, updated_at = ?
+      UPDATE search_watches
+      SET last_checked_at = ?, next_check_at = ?, updated_at = ?, consecutive_failures = ?, last_error = ?
       WHERE id = ? AND enabled = 1
-    `).run(attemptedAt, nextCheckAt, attemptedAt, id).changes > 0;
+    `).run(attemptedAt, nextCheckAt, attemptedAt, consecutiveFailures, error ?? null, id).changes > 0;
     }
     disableSearchWatch(id, updatedAt) {
         const result = this.#database.prepare(`
@@ -1052,7 +1071,9 @@ export class InventoryDatabase {
                 }
             }
             this.#database.prepare(`
-        UPDATE search_watches SET last_checked_at = ?, next_check_at = ?, updated_at = ? WHERE id = ?
+        UPDATE search_watches
+        SET last_checked_at = ?, next_check_at = ?, updated_at = ?, consecutive_failures = 0, last_error = NULL
+        WHERE id = ?
       `).run(input.checkedAt, input.nextCheckAt, input.checkedAt, input.watchId);
             this.#database.exec("COMMIT;");
             return notify;

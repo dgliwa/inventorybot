@@ -132,6 +132,36 @@ describe("SearchWatchService", () => {
     }
   });
 
+  it("backs off repeated failures and resets after a successful check", async () => {
+    const database = new InventoryDatabase(":memory:");
+    const client = new MutableSearchClient();
+    let now = new Date("2026-01-01T00:00:00.000Z");
+    const service = new SearchWatchService(database, client, () => now);
+    try {
+      const watch = await service.add({ domain: "costco.com", query: "magic gathering" });
+      database.deferSearchWatchAfterFailure(watch.id, now.toISOString(), 60, "HTTP 429");
+      expect(database.getSearchWatch(watch.id)).toMatchObject({
+        consecutiveFailures: 1,
+        lastError: "HTTP 429",
+        nextCheckAt: "2026-01-01T01:00:00.000Z",
+      });
+
+      now = new Date("2026-01-01T01:00:00.000Z");
+      database.deferSearchWatchAfterFailure(watch.id, now.toISOString(), 60, "HTTP 429");
+      expect(database.getSearchWatch(watch.id)).toMatchObject({
+        consecutiveFailures: 2,
+        nextCheckAt: "2026-01-01T03:00:00.000Z",
+      });
+
+      client.results = [{ url: "https://costco.com/magic-box", title: "Magic Box" }];
+      await service.run(watch.id);
+      expect(database.getSearchWatch(watch.id)).toMatchObject({ consecutiveFailures: 0 });
+      expect(database.getSearchWatch(watch.id)?.lastError).toBeUndefined();
+    } finally {
+      database.close();
+    }
+  });
+
   it("records a returned listing only after confirmed absence", async () => {
     const database = new InventoryDatabase(":memory:");
     const client = new MutableSearchClient();

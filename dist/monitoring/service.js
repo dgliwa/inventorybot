@@ -232,7 +232,7 @@ export class InventoryMonitor {
                     options.signal?.throwIfAborted();
                     summary.failures += 1;
                     if (!options.dryRun) {
-                        database.deferSearchWatchAfterFailure(watch.id, this.#now().toISOString(), Math.max(60, watch.cadenceMinutes));
+                        database.deferSearchWatchAfterFailure(watch.id, this.#now().toISOString(), Math.max(60, watch.cadenceMinutes), safeError(error));
                     }
                     this.#log({ event: "inventory_search_watch_failed", watch_id: watch.id, error: safeError(error) });
                 }
@@ -251,7 +251,11 @@ export class InventoryMonitor {
                 }, this.#now).dispatch({ signal: options.signal });
             }
             if (runId !== undefined) {
-                database.completeMonitorRun(runId, { completedAt: this.#now().toISOString(), summary });
+                database.completeMonitorRun(runId, {
+                    completedAt: this.#now().toISOString(),
+                    summary,
+                    ...(summary.failures > 0 ? { error: `${summary.failures} discovery watch${summary.failures === 1 ? "" : "es"} failed.` } : {}),
+                });
             }
             return summary;
         }

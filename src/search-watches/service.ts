@@ -77,6 +77,7 @@ export class SearchWatchService {
       enabled: input.enabled ?? true,
       notifyOnInitialResults: input.notifyOnInitialResults ?? true,
       adapter: discovery.adapter,
+      consecutiveFailures: 0,
       createdAt: now,
       updatedAt: now,
     });

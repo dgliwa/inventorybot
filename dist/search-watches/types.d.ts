@@ -39,6 +39,8 @@ export type RetailerSearchWatch = {
     updatedAt: string;
     lastCheckedAt?: string;
     nextCheckAt?: string;
+    consecutiveFailures: number;
+    lastError?: string;
 };
 export type RetailerSearchWatchResult = SearchResult & {
     firstSeenAt: string;
