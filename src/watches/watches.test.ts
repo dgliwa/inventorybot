@@ -4,7 +4,7 @@ import { AdapterRegistry } from "../adapters/registry.js";
 import { normalizeInventoryResult, type InventoryStatus } from "../domain/inventory.js";
 import { InventoryDatabase } from "../persistence/db.js";
 import { WatchService } from "./service.js";
-import { detectInventoryTransition } from "./transitions.js";
+import { detectInventoryResultTransition, detectInventoryTransition } from "./transitions.js";
 
 class SequenceAdapter implements RetailerAdapter {
   readonly id = "sequence-adapter";
@@ -71,6 +71,34 @@ describe("detectInventoryTransition", () => {
       detectInventoryTransition("in_stock", "out_of_stock", { notifyWhenUnavailable: true }),
     ).toMatchObject({ changed: true, notifyRecommended: true });
   });
+});
+
+it("notifies when a new fulfillment method becomes actionable", () => {
+  const base = {
+    status: "in_stock" as const,
+    confidence: 1,
+    domain: "shop.example.test",
+    url: "https://shop.example.test/product/42",
+    method: "public_api" as const,
+    checkedAt: "2026-01-01T00:00:00.000Z",
+    evidence: { summary: "Fixture" },
+  };
+  expect(detectInventoryResultTransition(
+    {
+      ...base,
+      fulfillment: {
+        shipping: { status: "unavailable" as const, orderableOnline: false },
+        stores: [],
+      },
+    },
+    {
+      ...base,
+      fulfillment: {
+        shipping: { status: "available" as const, orderableOnline: true },
+        stores: [],
+      },
+    },
+  )).toMatchObject({ changed: true, notifyRecommended: true });
 });
 
 describe("WatchService", () => {

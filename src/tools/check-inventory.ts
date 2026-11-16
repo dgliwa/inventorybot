@@ -2,6 +2,7 @@ import { normalizeInventoryResult, type InventoryResult } from "../domain/invent
 import type { ProductIdentity } from "../domain/product.js";
 import { AdapterRegistry } from "../adapters/registry.js";
 import type { InventoryCheckContext } from "../adapters/types.js";
+import type { RetailerSubscription } from "../retailers/types.js";
 import { normalizeDomain } from "../adapters/url.js";
 
 export type CheckInventoryInput = {
@@ -9,6 +10,7 @@ export type CheckInventoryInput = {
   expectedProduct?: ProductIdentity;
   timeoutMs?: number;
   signal?: AbortSignal;
+  retailerSubscription?: RetailerSubscription;
 };
 
 function invalidUrlResult(url: string, error: unknown): InventoryResult {
@@ -58,6 +60,7 @@ export async function checkInventory(
     expectedProduct: input.expectedProduct,
     timeoutMs: input.timeoutMs,
     signal: input.signal,
+    retailerSubscription: input.retailerSubscription,
   };
   return adapter.checkInventory(input.url, context);
 }

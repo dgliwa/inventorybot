@@ -45,6 +45,8 @@ export type RetailerSearchWatch = {
   updatedAt: string;
   lastCheckedAt?: string;
   nextCheckAt?: string;
+  consecutiveFailures: number;
+  lastError?: string;
 };
 
 export type RetailerSearchWatchResult = SearchResult & {
@@ -56,6 +58,19 @@ export type RetailerSearchWatchResult = SearchResult & {
   reappeared?: boolean;
   listingKind: "catalog_listing";
   availability: "not_checked";
+};
+
+export type SearchDiscoveryEvent = {
+  id: number;
+  watchId: string;
+  domain: string;
+  query: string;
+  url: string;
+  title?: string;
+  snippet?: string;
+  kind: "new" | "returned";
+  observedAt: string;
+  present: boolean;
 };
 
 export type SearchWatchRunResult = {

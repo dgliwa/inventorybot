@@ -1,5 +1,6 @@
+import type { FulfillmentResult } from "../domain/inventory.js";
 export type NotificationPayload = {
-    kind: "inventory_transition" | "search_result" | "test";
+    kind: "inventory_transition" | "search_result" | "discovery_digest" | "test";
     watchId?: string;
     targetId?: string;
     productName: string;
@@ -11,11 +12,29 @@ export type NotificationPayload = {
     price?: number;
     currency?: string;
     confidence?: number;
+    fulfillment?: FulfillmentResult;
     checkedAt: string;
     searchWatchId?: string;
     searchQuery?: string;
     resultTitle?: string;
     resultSnippet?: string;
+    discoveryGroups?: Array<{
+        retailerDomain: string;
+        searchQuery: string;
+        watchId: string;
+        results: Array<{
+            title: string;
+            url: string;
+            snippet?: string;
+            discoveryKind: "new" | "returned";
+            observedAt: string;
+            firstObservedAt: string;
+            activityCount: number;
+            present: boolean;
+            listingKind: "catalog_listing";
+            availability: "not_checked";
+        }>;
+    }>;
     searchResults?: Array<{
         title: string;
         url: string;

@@ -27,6 +27,7 @@ export declare class WatchService {
         retailers: Array<{
             url: string;
             enabled?: boolean;
+            retailerSubscriptionId?: string;
         }>;
         enabled?: boolean;
         requireActiveAdapter?: boolean;

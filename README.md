@@ -1,65 +1,60 @@
 # InventoryBot
 
-InventoryBot is an OpenClaw plugin for research-to-wishlist pipelines, general wishlist lifecycle management, safe retailer discovery, deterministic inventory monitoring, adapter candidate generation, durable scheduling, and transition-based notifications.
+InventoryBot is an OpenClaw plugin for wishlists, retailer catalog discovery, and exact-product availability monitoring.
+
+It deliberately separates two kinds of tracking:
+
+1. **Discovery watches** answer “what listings are appearing in this retailer category?”
+2. **Exact-product watches** answer “can I buy this product right now, and how?”
+
+Catalog presence is never reported as proof of stock or purchase availability.
 
 ## Architecture
 
 ```text
-research topic
-  current multi-source research -> evidence-backed candidates
-  -> promote selected listing into a new or existing wishlist item
-  -> independently continue, pause, or archive future discovery
+discovery watch (hourly or slower)
+  -> deterministic retailer search
+  -> catalog listing snapshots
+  -> new/returned listing events
+  -> one daily Discord digest
+
+retailer subscription
+  -> postal code, radius, primary/preferred stores
+  -> inherited by exact-product watches
+
+exact-product watch (frequent)
+  -> deterministic retailer adapter
+  -> shipping, delivery, pickup, and store-stock observations
+  -> actionable transition notification
 
 wishlist
-  idea -> researching -> wanted -> acquired
-  -> optional links, purchases, and watch associations
-  -> no polling or notifications by default
-
-slow loop
-  discover stale products
-  -> persist retailer candidates
-  -> statically inspect repeatedly uncertain targets
-  -> generate and validate safe adapter candidates
-  -> explicit fingerprint-bound human approval
-  -> active deterministic generated adapter
-
-fast loop
-  persisted watch
-  -> active deterministic adapters only
-  -> persisted observation and transition
-  -> transactional InventoryBot notification outbox
-  -> OpenClaw durable outbound queue
-  -> Discord outbound adapter
+  -> ideas, wanted items, links, purchases, and watch associations
+  -> no polling unless a watch is explicitly attached
 ```
 
-The fast loop never invokes search, browser inspection, generation, or repair. Unknown, blocked, and error results are never converted to `out_of_stock`.
+Unknown, blocked, and error responses are never converted to `out_of_stock`. Generated adapters remain inactive until validation and explicit approval.
 
 ## Install and validate
 
 ```bash
 npm install
-npm run build
 npm test
-npm run plugin:build
 npm run plugin:validate
 ```
 
-Phase 6 is a mixed tool/service plugin and therefore uses `definePluginEntry`. The project validation script checks runtime identity, config-schema parity, package entry existence, and exact manifest/tool registration parity. OpenClaw's `plugins validate --entry` command currently accepts authoring-metadata entries such as `defineToolPlugin`, not mixed service entries.
+OpenClaw 2026.9.8 or newer is required.
 
 ## Configuration
 
-Monitoring is disabled by default so installing the plugin does not immediately poll retailers. All settings below belong under `plugins.entries.inventorybot.config`.
+Settings belong under `plugins.entries.inventorybot.config`:
 
 ```yaml
-adapterPromotion:
-  mode: manual
-
 persistence:
   databasePath: plugins/inventorybot/inventorybot.sqlite
 
 monitoring:
   enabled: true
-  fastIntervalSeconds: 120
+  fastIntervalSeconds: 600
   slowIntervalHours: 12
   rediscoveryAfterHours: 168
   inspectAfterUnknownCount: 3
@@ -69,30 +64,132 @@ monitoring:
   jitterSeconds: 15
   notifyWhenUnavailable: false
 
+searchMonitoring:
+  enabled: true
+  digestHourLocal: 9
+
 notifications:
   discord:
     enabled: true
     target: "channel:123456789012345678"
-    # accountId: default
-    # threadId: optional-thread-id
   maxAttempts: 6
   batchSize: 25
   baseRetrySeconds: 30
 ```
 
-`databasePath` may be an intentional absolute path or a path relative to OpenClaw's state directory. Relative paths may not traverse outside the state directory, and an existing database destination must be a regular file rather than a symlink or device. The default is:
+Discovery scheduling uses each watch's cadence, with a minimum and default of 60 minutes. Repeated search failures use retailer-specific durable exponential backoff from one hour up to 24 hours, and a successful check resets the failure count. Runs containing failed watches are recorded as errors rather than completed successes. The daily digest hour uses the gateway process's local time.
 
-```text
-<openclaw-state>/plugins/inventorybot/inventorybot.sqlite
+## Discovery watches
+
+Discovery watches monitor a retailer's own search results. They do not run general web search and do not claim that a listing is purchasable.
+
+- `inventory_search_watch_add`
+- `inventory_search_watch_update`
+- `inventory_search_watch_status`
+- `inventory_search_watch_run`
+- `inventory_search_watch_remove`
+
+Hourly observations accumulate new and confirmed-returned listings. One daily notification aggregates all pending discovery events across watches. Each result says whether it remains present in the most recent search. A listing must be absent from three completed snapshots before a later appearance counts as returned.
+
+Example:
+
+```json
+{
+  "domain": "bestbuy.com",
+  "query": "magic the gathering",
+  "cadenceMinutes": 60,
+  "notifyOnInitialResults": true
+}
 ```
 
-Discord credentials remain in OpenClaw's Discord channel configuration. InventoryBot submits messages through `sendDurableMessageBatch` and does not store a bot token or call Discord directly. OpenClaw 2026.9.8 or newer is required.
+Search-result presence means only that the retailer listed the product in its catalog.
 
-## Tools
+## Retailer subscriptions
 
-### Wishlist
+A retailer subscription stores reusable location preferences for exact-product checks:
 
-Wishlist items are general-purpose: books, tools, appliances, collectibles, gifts, or anything else. Their lifecycle is independent from monitoring:
+- `inventory_retailer_subscribe`
+- `inventory_retailer_subscription_update`
+- `inventory_retailer_subscription_status`
+- `inventory_retailer_unsubscribe`
+
+Example:
+
+```json
+{
+  "domain": "bestbuy.com",
+  "postalCode": "55125",
+  "radiusMiles": 25,
+  "stores": [
+    { "storeId": "10", "name": "Oakdale", "primary": true },
+    { "storeId": "20", "name": "Maplewood" }
+  ]
+}
+```
+
+Exact-product targets reference a subscription with `retailerSubscriptionId`. The adapter receives the postal code, radius, and stores on every check. A subscription must match the target retailer domain.
+
+## Exact-product watches
+
+- `inventory_watch_add`
+- `inventory_watch_status`
+- `inventory_watch_run`
+- `inventory_watch_remove`
+
+Example:
+
+```json
+{
+  "product": {
+    "name": "Example product",
+    "sku": "SKU-42"
+  },
+  "retailers": [
+    {
+      "url": "https://retailer.example/products/sku-42",
+      "retailerSubscriptionId": "subscription-uuid"
+    }
+  ]
+}
+```
+
+Retailer adapters can report:
+
+```text
+shipping
+  status: available | unavailable | unknown
+  orderableOnline: true | false | null
+
+delivery
+  status: available | unavailable | unknown
+  orderableOnline: true | false | null
+
+stores[]
+  stock: in_stock | limited | out_of_stock | unknown
+  pickupOrderable: true | false | null
+  walkInAvailable: true | false | null
+```
+
+The fields remain separate because “stock reported at a store” does not necessarily mean “orderable online for pickup.” An adapter must return `unknown` rather than infer unsupported fulfillment facts.
+
+The fast loop sends immediate notifications only for meaningful availability transitions. Repeated unchanged availability is suppressed.
+
+## Adapter workflow
+
+- `discover_retailers`
+- `inspect_retailer`
+- `generate_retailer_adapter`
+- `validate_retailer_adapter`
+- `inventory_adapter_list`
+- `inventory_adapter_approve`
+- `inventory_adapter_revoke`
+- `check_inventory`
+
+The current generic generator safely handles conclusive JSON-LD product availability. Store-specific APIs frequently require a retailer-authored network or browser adapter. Location subscriptions and the fulfillment contract are available to those adapters, but InventoryBot never bypasses authentication, CAPTCHA, or anti-bot controls.
+
+## Wishlist
+
+Wishlist items remain independent from monitoring:
 
 ```text
 idea -> researching -> wanted -> acquired
@@ -100,251 +197,32 @@ idea -> researching -> wanted -> acquired
 any state -> archived
 ```
 
-An active associated watch adds a derived `watching` state for display; it does not replace the lifecycle state. Creating an item, saving a link, or recording a purchase never creates polling or notifications.
+Tools:
 
-- `inventory_wishlist_add` — create an item, defaulting to `idea`
-- `inventory_wishlist_update` — correct metadata, desired quantity, tags, or priority
-- `inventory_wishlist_transition` — change lifecycle state with retained history
-- `inventory_wishlist_status` — filter or inspect items with links, purchases, history, and monitors
-- `inventory_wishlist_link_add` / `inventory_wishlist_link_remove` — manage non-polling retailer and research links
-- `inventory_wishlist_purchase_add` / `inventory_wishlist_purchase_update` / `inventory_wishlist_purchase_delete` — maintain purchase history and derived acquired quantity
-- `inventory_wishlist_monitor_attach` / `inventory_wishlist_monitor_detach` — associate existing exact or search watches without enabling, disabling, or running them
-- `inventory_wishlist_summary` — aggregate lifecycle, priority, quantities, monitoring, and spending by currency
+- `inventory_wishlist_add`
+- `inventory_wishlist_update`
+- `inventory_wishlist_transition`
+- `inventory_wishlist_status`
+- `inventory_wishlist_link_add` / `inventory_wishlist_link_remove`
+- `inventory_wishlist_purchase_add` / `inventory_wishlist_purchase_update` / `inventory_wishlist_purchase_delete`
+- `inventory_wishlist_monitor_attach` / `inventory_wishlist_monitor_detach`
+- `inventory_wishlist_summary`
 
-A broad search watch can be associated with several wishlist items, and an item can use multiple search or exact inventory watches. Existing unassociated watches continue to operate normally.
+Adding a wishlist item or link never starts polling automatically.
 
-### Research pipeline
+## Monitoring and delivery
 
-Research topics are durable ideas that exist independently from the wishlist. A topic retains current and historical recommendations, supporting evidence, rejected candidates, seller-quality data, and every promotion into the wishlist.
+- `inventory_monitor_status`
+- `inventory_monitor_run_fast`
+- `inventory_monitor_run_slow`
+- `inventory_notification_test`
 
-```text
-research topic -> recurring research runs -> candidates
-               -> promote selected candidate -> wishlist item
-               -> continue or pause discovery independently
-```
+Discord messages use OpenClaw's durable outbound queue. InventoryBot owns retries only before durable handoff. Operational monitor history is pruned after seven days; observations, watch state, discovery events, and adapter approval history remain durable.
 
-This separation allows a selected exact listing to remain authoritative while the originating idea continues discovering future examples. Later research never silently replaces a promoted wishlist selection.
+## Security
 
-- `inventory_research_topic_add` — create an independent research idea with a refresh cadence and seller-quality policy
-- `inventory_research_topic_update` — correct, pause, resume, or archive a topic without deleting history
-- `inventory_research_status` — inspect the research pipeline, latest recommendation, evidence, and promotions
-- `inventory_research_due` — list active topics due for initial or recurring research
-- `inventory_research_search` — perform current multi-angle searches across manufacturers, established retailers, boutiques, and independent reviews
-- `inventory_research_record` — persist one evidence-backed snapshot with one current recommendation
-- `inventory_research_promote` — turn a candidate into a new or existing wishlist item and choose whether discovery continues
-
-Recommendation and alternative candidates default to manufacturers, household-name retailers, and reputable boutiques. Generic marketplace or unknown sellers are excluded unless explicitly allowed, and configured seller-rating minimums are enforced when ratings are available. Rejected candidates can still be retained as evidence explaining why they were excluded.
-
-When Derek supplies an exact listing without asking for alternatives, it should go directly into the wishlist rather than creating a broad research topic. A research topic should be created only when broader or continuing discovery is wanted.
-
-The plugin stores due dates, but research execution uses OpenClaw's web-search runtime and agent orchestration. A scheduled OpenClaw automation can call `inventory_research_due`, search each due topic, and record completed snapshots.
-
-### Discovery and adapter pipeline
-
-- `discover_retailers`
-- `check_inventory`
-- `inspect_retailer`
-- `generate_retailer_adapter`
-- `validate_retailer_adapter`
-- `inventory_adapter_list`
-- `inventory_adapter_approve`
-- `inventory_adapter_revoke`
-
-Generated source is never evaluated or automatically activated. Validation remains audit evidence until an operator approves the exact candidate ID and SHA-256 fingerprint. Runtime activation reconstructs the deterministic JSON-LD adapter from its validated specification rather than evaluating stored TypeScript.
-
-Approval input:
-
-```json
-{
-  "candidateId": "generated-shop-example-com-jsonld-0123456789ab",
-  "sourceSha256": "<64-character SHA-256 from the candidate>",
-  "confirmActivation": true,
-  "reason": "Reviewed all four validation gates"
-}
-```
-
-Revocation requires both the adapter ID and exact active candidate ID plus `confirmRevocation: true`. A newer candidate or repeated validation never silently replaces an active version. Active adapters are snapshotted at the start of each check or monitor run, so approval or revocation applies to the next run without mutating work already in flight.
-
-### Watches
-
-- `inventory_watch_add`
-- `inventory_watch_remove`
-- `inventory_watch_status`
-- `inventory_watch_run`
-
-Discovery searches exact identifiers first, then uses a supplied product name and optional `preferredDomains` for fallback and retailer-specific searches. Candidate confidence describes product-identity evidence; `preferred` describes operator retailer priority. Neither field verifies current stock. Codex-hosted citation results and structured search results are both supported.
-
-Example discovery input:
-
-```json
-{
-  "product": {
-    "name": "Example Synth",
-    "upc": "012345678905"
-  },
-  "preferredDomains": ["target.com", "bestbuy.com"]
-}
-```
-
-Example watch input:
-
-```json
-{
-  "product": {
-    "name": "Example Synth",
-    "manufacturer": "Acme",
-    "sku": "SYNTH-42"
-  },
-  "retailers": [
-    { "url": "https://retailer.example/products/synth-42" }
-  ]
-}
-```
-
-### Monitoring
-
-- `inventory_monitor_status` — show configuration, SQLite integrity/file/table metrics, adapter coverage, recent fast/slow runs, and outbox counts
-- `inventory_monitor_run_fast` — run enabled watches; optionally select `watchIds` and use `deliverNotifications: false` for a notification-suppressed smoke test
-- `inventory_monitor_run_slow` — run stale discovery and inspect repeatedly uncertain targets; optionally select `watchIds` or use `dryRun: true` for a no-write/no-network preview
-- `inventory_notification_test` — previews by default; sending a real Discord test requires `dryRun: false` and `confirmSend: true`
-
-`inventory_watch_remove` disables a watch by default and preserves its history. Permanent deletion requires both `permanent: true` and `confirmDeletion: true`. Watch add/status results report whether each target currently has an active adapter; set `requireActiveAdapter: true` when adding a watch to reject uncovered targets instead of persisting them.
-
-## Retailer search watches
-
-Search watches monitor a retailer's own search results rather than checking one known product URL:
-
-- `inventory_search_watch_add` — inspect the site, discover and validate a deterministic GET search adapter, then create a watch; cadence defaults to 60 minutes
-- `inventory_search_watch_update` — edit the retailer, search phrase, cadence, or enabled state; retailer/query changes require adapter rediscovery
-- `inventory_search_watch_status` — show the persisted adapter, scheduling, and recently seen results
-- `inventory_search_watch_run` — execute selected or all enabled site adapters now; supports a no-write `dryRun`
-- `inventory_search_watch_remove` — disable by default or permanently delete with confirmation
-
-Registration dynamically selects a supported deterministic adapter. It first looks for a public GET search form; retailer-specific detectors can instead validate a public catalog API, such as Costco's GRS JSON search endpoint. The selected endpoint runs twice and must return at least one stable matching product URL before anything is persisted. Scheduled runs call the stored adapter directly and never use a general web-search provider. Unsupported JavaScript-only, authenticated, blocked, off-domain, oversized, or unparseable searches fail safely with no watch creation.
-
-Result URLs are normalized and deduplicated within retained search-result history. The first scheduled run notifies for existing matches by default; set `notifyOnInitialResults: false` when a silent baseline is preferred. Changing the retailer or search phrase validates a replacement adapter before resetting the baseline, while changing only cadence preserves result history.
-
-```json
-{
-  "domain": "costco.com",
-  "query": "magic the gathering",
-  "cadenceMinutes": 60,
-  "notifyOnInitialResults": true
-}
-```
-
-Set `searchMonitoring.enabled: true` to run search watches without enabling the inventory fast/slow loops. The scheduler checks every minute for search watches whose individual cadence is due. Idle scheduler checks are not persisted as monitor runs.
-
-Each completed search sends at most one Discord message containing all newly discovered results. A previously seen URL is also reported when it disappears for at least one completed search and later reappears. Routine monitor runs and search results not seen for more than seven days are pruned. Notification delivery history and adapter approval and validation audit history are retained.
-
-## Fast loop
-
-The Gateway-owned InventoryBot service starts only during full plugin activation. When monitoring is enabled, the fast loop:
-
-1. loads every enabled watch
-2. checks enabled targets with active deterministic adapters
-3. bounds global and per-domain concurrency, adds schedule jitter, and enforces per-target timeouts
-4. isolates target and watch failures
-5. atomically persists the observation and any qualifying outbox event
-6. drains a bounded notification batch
-7. retries only failures that occur before durable handoff; after admission, OpenClaw owns delivery, retries, receipts, and unknown-send reconciliation
-
-A first or changed transition to `in_stock` recommends notification. Repeated `in_stock -> in_stock` results are suppressed. `in_stock -> out_of_stock` is optional.
-
-## Slow loop
-
-The slow loop runs independently at a much lower frequency. It:
-
-- rediscovers products whose discovery snapshot is stale
-- persists normalized retailer candidates without adding them to the fast loop
-- inspects targets after a configurable consecutive `unknown`/`error` threshold
-- generates candidates only from conclusive high-confidence JSON-LD
-- performs the existing fixture/live/cross-check validation gates
-- persists every candidate and validation report
-
-It does not automatically activate candidates, use a browser, bypass CAPTCHA, or automatically add newly discovered URLs to a watch. Activation requires a separate `inventory_adapter_approve` call with `confirmActivation: true`, the immutable candidate ID, and its exact source hash.
-
-## Durable notification delivery
-
-A qualifying observation and its notification are committed in one InventoryBot SQLite transaction. The dispatcher then submits that record to OpenClaw with required durability and a stable delivery-intent ID derived from the immutable notification fingerprint.
-
-InventoryBot retries only failures that happen before OpenClaw accepts custody. Once accepted, the local row becomes `handed_off` and is never independently resent; OpenClaw owns provider retries and supported unknown-send reconciliation. Immediate provider acceptance records `sent`, intentional no-send decisions record `suppressed`, and provider message IDs are retained when returned synchronously.
-
-Expired InventoryBot processing leases remain recoverable before handoff. OpenClaw keeps completed stable intents for bounded deduplication, preventing a crash between queue admission and local handoff recording from creating a second physical send.
-
-## SQLite schema
-
-Schema version 8 contains:
-
-```text
-products
-retailer_candidates
-inventory_watches
-inventory_targets
-inventory_observations
-retailer_adapters
-adapter_versions
-adapter_validation_runs
-adapter_approval_events
-notifications
-monitor_runs
-slow_inspections
-search_watches
-search_watch_results
-wishlist_items
-wishlist_transitions
-wishlist_links
-wishlist_purchases
-wishlist_inventory_watches
-wishlist_search_watches
-research_topics
-research_runs
-research_candidates
-research_promotions
-```
-
-SQLite foreign keys and WAL mode are enabled. Database directories and files use restrictive permissions where supported. Monitor status runs `PRAGMA quick_check` and reports schema version, database size, and per-table row counts. Mutating tool calls check cancellation immediately before writes; monitor shutdown aborts and joins active work before its database closes.
-
-## Observability
-
-Target checks emit structured JSON with:
-
-```text
-watch_id, product_id, domain, url (query-redacted),
-adapter_id, adapter_version, status, confidence,
-method, duration_ms, checked_at
-```
-
-Scheduler, discovery, inspection, and delivery failures emit separate structured events. Full URLs remain in persisted watch data and notifications, but query strings and fragments are removed from logs.
-
-## Security notes
-
-- Fast monitoring is deterministic and read-only toward retailers.
-- Slow inspection uses credential-free public HTTP(S), private-address rejection, bounded redirects, GET-only requests, response-size limits, and timeouts.
+- Deterministic checks are read-only toward retailers.
+- Public HTTP inspection is credential-free, GET-only, timeout-bounded, redirect-bounded, and private-address rejected.
+- Full product URLs are persisted, but logs remove query strings and fragments.
+- Database files use restrictive permissions where supported.
 - CAPTCHA and anti-bot controls are never bypassed.
-- Discord delivery uses OpenClaw's required-durability outbound queue and configured channel adapter.
-- Native `fetch` retains a documented DNS-rebinding race; use OpenClaw's network sandbox for untrusted domains.
-
-## Remaining limits
-
-- Adapter approval and revocation are deliberately manual; there is no automatic promotion policy.
-- Browser and network-traffic inspection are not implemented.
-- Newly discovered retailer candidates require operator review before becoming watch targets.
-- Recurring research due dates are durable, but an OpenClaw agent or automation must execute web research and record the result; the deterministic monitor never invents recommendations.
-- Scheduling is process-local, while recent run history, observations, pre-handoff outbox work, and leases are durable in InventoryBot SQLite; accepted delivery work is durable in OpenClaw's outbound queue. Routine operational history has a seven-day retention window.
-
-### Best Buy keyword-search adapter
-
-Best Buy search watches use the public server-rendered search page at
-`/site/searchpage.jsp`, with `st` for the query and at most three `cp` pages.
-No account credentials, cookies, browser automation, developer API key, or
-anti-bot bypass are used. Registration requires a matching product URL that is
-stable across two searches.
-
-The adapter returns at most 50 matching products and treats search as discovery,
-not stock status or an exhaustive crawl. Matching requires every query token.
-Only HTTPS Best Buy product URLs are accepted; current product IDs and legacy
-numeric SKUs are canonicalized and deduplicated. The endpoint is strictly
-allowlisted, public-DNS checks remain enabled, redirects are not followed, and
-response bytes and request time are bounded. HTTP 401, 403, 429, and 435 or an
-explicit challenge page fail closed as `SEARCH_SITE_BLOCKED`.

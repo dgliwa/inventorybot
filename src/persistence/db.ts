@@ -16,10 +16,12 @@ import type {
   ResearchTopicStatus,
   ResearchVerdict,
 } from "../research/types.js";
+import type { RetailerSubscription, RetailerStorePreference } from "../retailers/types.js";
 import type {
   DeterministicSearchAdapter,
   RetailerSearchWatch,
   RetailerSearchWatchResult,
+  SearchDiscoveryEvent,
 } from "../search-watches/types.js";
 import type { InventoryWatch, InventoryWatchTarget } from "../watches/types.js";
 import type {
@@ -37,7 +39,13 @@ export type CreateWatchRecord = {
   id: string;
   productId: string;
   product: ProductIdentity;
-  targets: Array<{ id: string; domain: string; url: string; enabled: boolean }>;
+  targets: Array<{
+    id: string;
+    domain: string;
+    url: string;
+    enabled: boolean;
+    retailerSubscriptionId?: string;
+  }>;
   enabled: boolean;
   createdAt: string;
 };
@@ -56,6 +64,7 @@ type TargetRow = {
   domain: string;
   url: string;
   enabled: number;
+  retailer_subscription_id: string | null;
   result_json: string | null;
 };
 
@@ -84,6 +93,8 @@ type SearchWatchRow = {
   updated_at: string;
   last_checked_at: string | null;
   next_check_at: string | null;
+  consecutive_failures: number;
+  last_error: string | null;
 };
 
 function hydrateWishlistItem(row: WishlistItemRow): WishlistItem {
@@ -116,6 +127,8 @@ function hydrateSearchWatch(row: SearchWatchRow): RetailerSearchWatch {
     updatedAt: row.updated_at,
     ...(row.last_checked_at ? { lastCheckedAt: row.last_checked_at } : {}),
     ...(row.next_check_at ? { nextCheckAt: row.next_check_at } : {}),
+    consecutiveFailures: Number(row.consecutive_failures),
+    ...(row.last_error ? { lastError: row.last_error } : {}),
   };
 }
 
@@ -159,6 +172,9 @@ const INVENTORY_TABLES = [
   "adapter_approval_events",
   "search_watches",
   "search_watch_results",
+  "search_discovery_events",
+  "discovery_digest_runs",
+  "retailer_subscriptions",
   "wishlist_items",
   "wishlist_transitions",
   "wishlist_links",
@@ -236,8 +252,8 @@ export class InventoryDatabase {
     const version = this.#database.prepare("PRAGMA user_version").get() as {
       user_version: number;
     };
-    if (version.user_version > 9) {
-      throw new Error(`InventoryBot database schema ${version.user_version} is newer than supported schema 9.`);
+    if (version.user_version > 12) {
+      throw new Error(`InventoryBot database schema ${version.user_version} is newer than supported schema 12.`);
     }
     this.#database.exec(`
       CREATE TABLE IF NOT EXISTS products (
@@ -617,6 +633,59 @@ export class InventoryDatabase {
         COMMIT;
       `);
     }
+    if (version.user_version < 10) {
+      this.#database.exec(`
+        BEGIN IMMEDIATE;
+        CREATE TABLE search_discovery_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          watch_id TEXT NOT NULL REFERENCES search_watches(id) ON DELETE CASCADE,
+          url TEXT NOT NULL,
+          event_kind TEXT NOT NULL CHECK(event_kind IN ('new', 'returned')),
+          observed_at TEXT NOT NULL,
+          digested_at TEXT
+        );
+        CREATE INDEX search_discovery_events_pending
+          ON search_discovery_events(digested_at, observed_at, id);
+        CREATE TABLE discovery_digest_runs (
+          local_date TEXT PRIMARY KEY,
+          completed_at TEXT NOT NULL,
+          event_count INTEGER NOT NULL CHECK(event_count >= 0)
+        );
+        UPDATE search_watches SET cadence_minutes = 60 WHERE cadence_minutes < 60;
+        PRAGMA user_version = 10;
+        COMMIT;
+      `);
+    }
+    if (version.user_version < 11) {
+      this.#database.exec(`
+        BEGIN IMMEDIATE;
+        CREATE TABLE retailer_subscriptions (
+          id TEXT PRIMARY KEY,
+          domain TEXT NOT NULL,
+          postal_code TEXT NOT NULL,
+          radius_miles INTEGER NOT NULL CHECK(radius_miles >= 1 AND radius_miles <= 250),
+          stores_json TEXT NOT NULL,
+          enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX retailer_subscriptions_domain
+          ON retailer_subscriptions(domain, enabled, updated_at DESC);
+        ALTER TABLE inventory_targets ADD COLUMN retailer_subscription_id TEXT
+          REFERENCES retailer_subscriptions(id) ON DELETE SET NULL;
+        PRAGMA user_version = 11;
+        COMMIT;
+      `);
+    }
+    if (version.user_version < 12) {
+      this.#database.exec(`
+        BEGIN IMMEDIATE;
+        ALTER TABLE search_watches ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK(consecutive_failures >= 0);
+        ALTER TABLE search_watches ADD COLUMN last_error TEXT;
+        PRAGMA user_version = 12;
+        COMMIT;
+      `);
+    }
   }
 
   createWishlistItem(item: WishlistItem): void {
@@ -888,6 +957,80 @@ export class InventoryDatabase {
       .run(itemId, watchId).changes > 0;
   }
 
+  createRetailerSubscription(subscription: RetailerSubscription): RetailerSubscription {
+    this.#database.prepare(`
+      INSERT INTO retailer_subscriptions(
+        id, domain, postal_code, radius_miles, stores_json, enabled, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      subscription.id,
+      subscription.domain,
+      subscription.postalCode,
+      subscription.radiusMiles,
+      JSON.stringify(subscription.stores),
+      subscription.enabled ? 1 : 0,
+      subscription.createdAt,
+      subscription.updatedAt,
+    );
+    return this.getRetailerSubscription(subscription.id)!;
+  }
+
+  getRetailerSubscription(id: string): RetailerSubscription | undefined {
+    const row = this.#database.prepare(`
+      SELECT id, domain, postal_code, radius_miles, stores_json, enabled, created_at, updated_at
+      FROM retailer_subscriptions WHERE id = ?
+    `).get(id) as {
+      id: string; domain: string; postal_code: string; radius_miles: number;
+      stores_json: string; enabled: number; created_at: string; updated_at: string;
+    } | undefined;
+    return row ? {
+      id: row.id,
+      domain: row.domain,
+      postalCode: row.postal_code,
+      radiusMiles: Number(row.radius_miles),
+      stores: JSON.parse(row.stores_json) as RetailerStorePreference[],
+      enabled: row.enabled === 1,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    } : undefined;
+  }
+
+  listRetailerSubscriptions(): RetailerSubscription[] {
+    const rows = this.#database.prepare(`
+      SELECT id FROM retailer_subscriptions ORDER BY domain ASC, updated_at DESC
+    `).all() as unknown as Array<{ id: string }>;
+    return rows.map(({ id }) => this.getRetailerSubscription(id)!);
+  }
+
+  updateRetailerSubscription(id: string, changes: {
+    postalCode?: string;
+    radiusMiles?: number;
+    stores?: RetailerStorePreference[];
+    enabled?: boolean;
+    updatedAt: string;
+  }): RetailerSubscription | undefined {
+    const current = this.getRetailerSubscription(id);
+    if (!current) return undefined;
+    this.#database.prepare(`
+      UPDATE retailer_subscriptions SET postal_code = ?, radius_miles = ?, stores_json = ?,
+        enabled = ?, updated_at = ? WHERE id = ?
+    `).run(
+      changes.postalCode ?? current.postalCode,
+      changes.radiusMiles ?? current.radiusMiles,
+      JSON.stringify(changes.stores ?? current.stores),
+      (changes.enabled ?? current.enabled) ? 1 : 0,
+      changes.updatedAt,
+      id,
+    );
+    return this.getRetailerSubscription(id);
+  }
+
+  disableRetailerSubscription(id: string, updatedAt: string): boolean {
+    return this.#database.prepare(`
+      UPDATE retailer_subscriptions SET enabled = 0, updated_at = ? WHERE id = ? AND enabled = 1
+    `).run(updatedAt, id).changes > 0;
+  }
+
   createWatch(record: CreateWatchRecord): InventoryWatch {
     this.#database.exec("BEGIN IMMEDIATE;");
     try {
@@ -898,10 +1041,19 @@ export class InventoryDatabase {
         "INSERT INTO inventory_watches(id, product_id, created_at, enabled) VALUES (?, ?, ?, ?)",
       ).run(record.id, record.productId, record.createdAt, record.enabled ? 1 : 0);
       const insertTarget = this.#database.prepare(
-        "INSERT INTO inventory_targets(id, watch_id, domain, url, enabled) VALUES (?, ?, ?, ?, ?)",
+        `INSERT INTO inventory_targets(
+          id, watch_id, domain, url, enabled, retailer_subscription_id
+        ) VALUES (?, ?, ?, ?, ?, ?)`,
       );
       for (const target of record.targets) {
-        insertTarget.run(target.id, record.id, target.domain, target.url, target.enabled ? 1 : 0);
+        insertTarget.run(
+          target.id,
+          record.id,
+          target.domain,
+          target.url,
+          target.enabled ? 1 : 0,
+          target.retailerSubscriptionId ?? null,
+        );
       }
       this.#database.exec("COMMIT;");
     } catch (error) {
@@ -980,7 +1132,8 @@ export class InventoryDatabase {
   getSearchWatch(id: string): RetailerSearchWatch | undefined {
     const row = this.#database.prepare(`
       SELECT id, domain, query, cadence_minutes, enabled, notify_on_initial_results,
-             adapter_json, created_at, updated_at, last_checked_at, next_check_at
+             adapter_json, created_at, updated_at, last_checked_at, next_check_at,
+             consecutive_failures, last_error
       FROM search_watches WHERE id = ?
     `).get(id) as SearchWatchRow | undefined;
     return row ? hydrateSearchWatch(row) : undefined;
@@ -989,7 +1142,8 @@ export class InventoryDatabase {
   listSearchWatches(): RetailerSearchWatch[] {
     const rows = this.#database.prepare(`
       SELECT id, domain, query, cadence_minutes, enabled, notify_on_initial_results,
-             adapter_json, created_at, updated_at, last_checked_at, next_check_at
+             adapter_json, created_at, updated_at, last_checked_at, next_check_at,
+             consecutive_failures, last_error
       FROM search_watches ORDER BY created_at ASC
     `).all() as unknown as SearchWatchRow[];
     return rows.map(hydrateSearchWatch);
@@ -1046,6 +1200,19 @@ export class InventoryDatabase {
     return this.getSearchWatch(id);
   }
 
+  deferSearchWatchAfterFailure(id: string, attemptedAt: string, baseRetryMinutes = 60, error?: string): boolean {
+    const watch = this.getSearchWatch(id);
+    if (!watch?.enabled) return false;
+    const consecutiveFailures = watch.consecutiveFailures + 1;
+    const retryMinutes = Math.min(24 * 60, baseRetryMinutes * 2 ** Math.min(consecutiveFailures - 1, 5));
+    const nextCheckAt = new Date(Date.parse(attemptedAt) + retryMinutes * 60_000).toISOString();
+    return this.#database.prepare(`
+      UPDATE search_watches
+      SET last_checked_at = ?, next_check_at = ?, updated_at = ?, consecutive_failures = ?, last_error = ?
+      WHERE id = ? AND enabled = 1
+    `).run(attemptedAt, nextCheckAt, attemptedAt, consecutiveFailures, error ?? null, id).changes > 0;
+  }
+
   disableSearchWatch(id: string, updatedAt: string): boolean {
     const result = this.#database.prepare(`
       UPDATE search_watches SET enabled = 0, updated_at = ? WHERE id = ? AND enabled = 1
@@ -1085,6 +1252,93 @@ export class InventoryDatabase {
       listingKind: "catalog_listing" as const,
       availability: "not_checked" as const,
     }));
+  }
+
+  recordSearchDiscoveryEvents(input: {
+    watchId: string;
+    results: RetailerSearchWatchResult[];
+    observedAt: string;
+  }): number {
+    if (input.results.length === 0) return 0;
+    const insert = this.#database.prepare(`
+      INSERT INTO search_discovery_events(watch_id, url, event_kind, observed_at)
+      VALUES (?, ?, ?, ?)
+    `);
+    this.#database.exec("BEGIN IMMEDIATE;");
+    try {
+      for (const result of input.results) {
+        insert.run(
+          input.watchId,
+          result.url,
+          result.reappeared ? "returned" : "new",
+          input.observedAt,
+        );
+      }
+      this.#database.exec("COMMIT;");
+      return input.results.length;
+    } catch (error) {
+      this.#database.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+
+  listPendingSearchDiscoveryEvents(limit = 500): SearchDiscoveryEvent[] {
+    const rows = this.#database.prepare(`
+      SELECT e.id, e.watch_id, w.domain, w.query, e.url, r.title, r.snippet,
+             e.event_kind, e.observed_at, r.present
+      FROM search_discovery_events e
+      JOIN search_watches w ON w.id = e.watch_id
+      JOIN search_watch_results r ON r.watch_id = e.watch_id AND r.url = e.url
+      WHERE e.digested_at IS NULL
+      ORDER BY e.observed_at ASC, e.id ASC
+      LIMIT ?
+    `).all(limit) as unknown as Array<{
+      id: number; watch_id: string; domain: string; query: string; url: string;
+      title: string | null; snippet: string | null; event_kind: "new" | "returned";
+      observed_at: string; present: number;
+    }>;
+    return rows.map((row) => ({
+      id: Number(row.id),
+      watchId: row.watch_id,
+      domain: row.domain,
+      query: row.query,
+      url: row.url,
+      ...(row.title ? { title: row.title } : {}),
+      ...(row.snippet ? { snippet: row.snippet } : {}),
+      kind: row.event_kind,
+      observedAt: row.observed_at,
+      present: row.present === 1,
+    }));
+  }
+
+  hasDiscoveryDigestRun(localDate: string): boolean {
+    return Boolean(this.#database.prepare(
+      "SELECT 1 FROM discovery_digest_runs WHERE local_date = ?",
+    ).get(localDate));
+  }
+
+  completeDiscoveryDigest(input: {
+    localDate: string;
+    completedAt: string;
+    eventIds: number[];
+  }): void {
+    this.#database.exec("BEGIN IMMEDIATE;");
+    try {
+      if (input.eventIds.length > 0) {
+        this.#database.prepare(`
+          UPDATE search_discovery_events SET digested_at = ?
+          WHERE id IN (SELECT value FROM json_each(?)) AND digested_at IS NULL
+        `).run(input.completedAt, JSON.stringify(input.eventIds));
+      }
+      this.#database.prepare(`
+        INSERT INTO discovery_digest_runs(local_date, completed_at, event_count)
+        VALUES (?, ?, ?)
+      `).run(input.localDate, input.completedAt, input.eventIds.length);
+      this.#database.exec("COMMIT;");
+    } catch (error) {
+      this.#database.exec("ROLLBACK;");
+      throw error;
+    }
   }
 
   recordSearchWatchResults(input: {
@@ -1175,7 +1429,9 @@ export class InventoryDatabase {
         }
       }
       this.#database.prepare(`
-        UPDATE search_watches SET last_checked_at = ?, next_check_at = ?, updated_at = ? WHERE id = ?
+        UPDATE search_watches
+        SET last_checked_at = ?, next_check_at = ?, updated_at = ?, consecutive_failures = 0, last_error = NULL
+        WHERE id = ?
       `).run(input.checkedAt, input.nextCheckAt, input.checkedAt, input.watchId);
       this.#database.exec("COMMIT;");
       return notify;
@@ -1218,6 +1474,13 @@ export class InventoryDatabase {
       input.sourceId,
     );
     return result.changes > 0;
+  }
+
+  latestResult(targetId: string): InventoryResult | undefined {
+    const row = this.#database.prepare(
+      "SELECT result_json FROM inventory_observations WHERE target_id = ? ORDER BY id DESC LIMIT 1",
+    ).get(targetId) as { result_json: string } | undefined;
+    return row ? JSON.parse(row.result_json) as InventoryResult : undefined;
   }
 
   latestStatus(targetId: string): InventoryStatus | undefined {
@@ -2182,7 +2445,7 @@ export class InventoryDatabase {
 
   private hydrateWatch(row: WatchRow): InventoryWatch {
     const targetRows = this.#database.prepare(`
-      SELECT t.id, t.domain, t.url, t.enabled,
+      SELECT t.id, t.domain, t.url, t.enabled, t.retailer_subscription_id,
         (SELECT result_json FROM inventory_observations o
          WHERE o.target_id = t.id ORDER BY o.id DESC LIMIT 1) AS result_json
       FROM inventory_targets t
@@ -2194,6 +2457,9 @@ export class InventoryDatabase {
       domain: target.domain,
       url: target.url,
       enabled: target.enabled === 1,
+      ...(target.retailer_subscription_id
+        ? { retailerSubscriptionId: target.retailer_subscription_id }
+        : {}),
       ...(target.result_json ? { latestResult: JSON.parse(target.result_json) as InventoryResult } : {}),
     }));
     return {
